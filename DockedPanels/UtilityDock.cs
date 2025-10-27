@@ -1,7 +1,6 @@
 ﻿using System.Drawing;
 using System.Windows.Forms;
 using WeifenLuo.WinFormsUI.Docking;
-using System;
 
 namespace SwimEditor
 {
@@ -64,7 +63,8 @@ namespace SwimEditor
         UseVisualStyleBackColor = false,
         Padding = new Padding(0) 
       };
-      log.Dock = DockStyle.Fill;     // ensure fill (redundant if already set inside control)
+
+      log.Dock = DockStyle.Fill;   
       logTab.Controls.Add(log);
       tabs.TabPages.Add(logTab);
 
@@ -77,6 +77,7 @@ namespace SwimEditor
         UseVisualStyleBackColor = true,
         Padding = new Padding(0) 
       };
+
       fileView.Dock = DockStyle.Fill;
       fileTab.Controls.Add(fileView);
       tabs.TabPages.Add(fileTab);
