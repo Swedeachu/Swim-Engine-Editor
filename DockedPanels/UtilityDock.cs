@@ -25,9 +25,8 @@ namespace SwimEditor
         Dock = DockStyle.Fill,
         DrawMode = TabDrawMode.OwnerDrawFixed,
 
-        // 👇 make tabs use the space better
         SizeMode = TabSizeMode.Fixed,   // fixed height (and width, but we handle text with ellipsis)
-        ItemSize = new Size(150, 30),   // width hint; height = 30px
+        ItemSize = new Size(80, 20),   // width hint; height = 30px
         Padding = new Point(20, 6),     // inner padding of each tab (more readable)
         HotTrack = true
       };
@@ -75,7 +74,7 @@ namespace SwimEditor
       {
         BackColor = SwimEditorTheme.PageBg,
         ForeColor = SwimEditorTheme.Text,
-        UseVisualStyleBackColor = false,
+        UseVisualStyleBackColor = true,
         Padding = new Padding(0) 
       };
       _fileView.Dock = DockStyle.Fill;
@@ -84,7 +83,6 @@ namespace SwimEditor
 
       Controls.Add(_tabs);
     }
-
 
     // Public API surface
     public void AppendLog(string text) => _log.AppendLine(text);

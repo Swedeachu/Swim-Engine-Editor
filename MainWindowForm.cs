@@ -9,6 +9,7 @@ namespace SwimEditor
 
   public partial class MainWindowForm : Form
   {
+
     private DockPanel dockPanel;
     private VisualStudioToolStripExtender vsExtender;
     private ThemeBase theme;
@@ -80,26 +81,28 @@ namespace SwimEditor
       System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(layoutPath));
     }
 
+    // TODO: serialize each panels width and height on last program close and their position and dock state
     private void CreateAndShowPanes()
     {
       hierarchy = new HierarchyDock { Text = "Hierarchy" };
       inspector = new InspectorDock { Text = "Inspector" };
       gameView = new GameViewDock { Text = "Game View" };
-      console = new UtilityDock { Text = "Console" };
+      console = new UtilityDock { Text = "Utility" };
 
       gameView.Show(dockPanel, DockState.Document);
       hierarchy.Show(dockPanel, DockState.DockLeft);
       inspector.Show(dockPanel, DockState.DockRight);
+
+      // Give the bottom more verticality *before* showing console
+      dockPanel.DockBottomPortion = 300d; // or 0.35;
       console.Show(dockPanel, DockState.DockBottom);
 
       console.AppendLog("Swim Engine Editor v1.0");
-      for (int i = 0; i < 50; i++)
-      {
-        console.AppendLog("Output console test: " + i);
-      }
+      // for (int i = 0; i < 50; i++) { console.AppendLog("Output console test: " + i); }
 
       hierarchy.OnSelectionChanged += obj => inspector.SetInspectedObject(obj);
 
+      // Only load layout if it exists; it will override sizes
       LoadLayoutIfExists();
     }
 

@@ -14,8 +14,6 @@ namespace SwimEditor
 
     public GameViewDock()
     {
-      // PersistString = GetType().FullName;
-
       renderSurface = new DoubleBufferedPanel
       {
         Dock = DockStyle.Fill,

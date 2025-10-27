@@ -14,8 +14,6 @@ namespace SwimEditor
 
     public HierarchyDock()
     {
-      // PersistString = GetType().FullName;
-
       // Dark theme needs explicit colors
       treeView = new TreeView
       {
