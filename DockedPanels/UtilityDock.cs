@@ -12,15 +12,15 @@ namespace SwimEditor
   public class UtilityDock : DockContent
   {
 
-    private readonly TabControl _tabs;
-    private readonly ConsoleLogControl _log;
-    private readonly FileViewControl _fileView;
+    private readonly TabControl tabs;
+    private readonly ConsoleLogControl log;
+    private readonly FileViewControl fileView;
 
     public UtilityDock()
     {
       BackColor = SwimEditorTheme.Bg;
 
-      _tabs = new TabControl
+      tabs = new TabControl
       {
         Dock = DockStyle.Fill,
         DrawMode = TabDrawMode.OwnerDrawFixed,
@@ -32,11 +32,11 @@ namespace SwimEditor
       };
 
       // reduce flicker on owner-draw
-      _tabs.GetType().GetProperty("DoubleBuffered",
+      tabs.GetType().GetProperty("DoubleBuffered",
           System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
-          ?.SetValue(_tabs, true, null);
+          ?.SetValue(tabs, true, null);
 
-      _tabs.DrawItem += (s, e) =>
+      tabs.DrawItem += (s, e) =>
       {
         var selected = (e.State & DrawItemState.Selected) == DrawItemState.Selected;
         var tabRect = e.Bounds;
@@ -47,16 +47,16 @@ namespace SwimEditor
         {
           e.Graphics.FillRectangle(back, tabRect);
           e.Graphics.DrawRectangle(border, tabRect);
-          var tabText = _tabs.TabPages[e.Index].Text;
+          var tabText = tabs.TabPages[e.Index].Text;
           TextRenderer.DrawText(
-            e.Graphics, tabText, _tabs.Font, tabRect, SwimEditorTheme.Text,
+            e.Graphics, tabText, tabs.Font, tabRect, SwimEditorTheme.Text,
             TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.EndEllipsis
           );
         }
       };
 
       // Debug Log
-      _log = new ConsoleLogControl();
+      log = new ConsoleLogControl();
       var logTab = new TabPage("Debug Log")
       {
         BackColor = SwimEditorTheme.PageBg,
@@ -64,12 +64,12 @@ namespace SwimEditor
         UseVisualStyleBackColor = false,
         Padding = new Padding(0) 
       };
-      _log.Dock = DockStyle.Fill;     // ensure fill (redundant if already set inside control)
-      logTab.Controls.Add(_log);
-      _tabs.TabPages.Add(logTab);
+      log.Dock = DockStyle.Fill;     // ensure fill (redundant if already set inside control)
+      logTab.Controls.Add(log);
+      tabs.TabPages.Add(logTab);
 
       // File View
-      _fileView = new FileViewControl();
+      fileView = new FileViewControl();
       var fileTab = new TabPage("File View")
       {
         BackColor = SwimEditorTheme.PageBg,
@@ -77,19 +77,19 @@ namespace SwimEditor
         UseVisualStyleBackColor = true,
         Padding = new Padding(0) 
       };
-      _fileView.Dock = DockStyle.Fill;
-      fileTab.Controls.Add(_fileView);
-      _tabs.TabPages.Add(fileTab);
+      fileView.Dock = DockStyle.Fill;
+      fileTab.Controls.Add(fileView);
+      tabs.TabPages.Add(fileTab);
 
-      Controls.Add(_tabs);
+      Controls.Add(tabs);
     }
 
     // Public API surface
-    public void AppendLog(string text) => _log.AppendLine(text);
-    public void ClearLog() => _log.Clear();
+    public void AppendLog(string text) => log.AppendLine(text);
+    public void ClearLog() => log.Clear();
 
-    public void SetFileRoot(string path) => _fileView.SetRoot(path);
-    public void NavigateFileView(string path) => _fileView.NavigateTo(path);
+    public void SetFileRoot(string path) => fileView.SetRoot(path);
+    public void NavigateFileView(string path) => fileView.NavigateTo(path);
 
   }
 

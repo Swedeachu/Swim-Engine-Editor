@@ -7,13 +7,13 @@ namespace SwimEditor
   public class ConsoleLogControl : UserControl
   {
 
-    private readonly TextBox _box;
+    private readonly TextBox box;
 
     public ConsoleLogControl()
     {
       BackColor = SwimEditorTheme.PageBg;
 
-      _box = new TextBox
+      box = new TextBox
       {
         Dock = DockStyle.Fill,
         Multiline = true,
@@ -24,11 +24,11 @@ namespace SwimEditor
         BorderStyle = BorderStyle.None
       };
 
-      Controls.Add(_box);
+      Controls.Add(box);
     }
 
-    public void AppendLine(string text) => _box.AppendText(text + "\r\n");
-    public void Clear() => _box.Clear();
+    public void AppendLine(string text) => box.AppendText(text + "\r\n");
+    public void Clear() => box.Clear();
 
   }
 
