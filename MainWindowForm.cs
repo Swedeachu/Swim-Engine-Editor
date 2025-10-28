@@ -28,7 +28,7 @@ namespace SwimEditor
     {
       InitializeComponent();
 
-      this.BackColor = SwimEditorTheme.Bg;
+      this.BackColor = SwimEditorTheme.PageBg;
 
       InitializeDockingUi();
 

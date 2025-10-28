@@ -68,6 +68,9 @@
     </Reference>
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="DockedPanels\RenderControls\DarkScrollBar.cs">
+      <SubType>Component</SubType>
+    </Compile>
     <Compile Include="DockedPanels\UtilityDock.cs">
       <SubType>Form</SubType>
     </Compile>

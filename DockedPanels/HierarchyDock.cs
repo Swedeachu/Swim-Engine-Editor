@@ -21,7 +21,7 @@ namespace SwimEditor
         Dock = DockStyle.Fill,
         HideSelection = false,
         BorderStyle = BorderStyle.None,
-        BackColor = Color.FromArgb(45, 45, 48),
+        BackColor = SwimEditorTheme.PageBg,
         ForeColor = Color.Gainsboro
       };
 

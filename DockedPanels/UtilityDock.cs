@@ -24,7 +24,7 @@ namespace SwimEditor
         Dock = DockStyle.Fill,
         DrawMode = TabDrawMode.OwnerDrawFixed,
         SizeMode = TabSizeMode.Fixed,
-        ItemSize = new Size(80, 20),
+        ItemSize = new Size(60, 20),
         Padding = new Point(20, 6),
         HotTrack = true,
         BackColor = SwimEditorTheme.Bg,
@@ -33,7 +33,7 @@ namespace SwimEditor
 
       // Debug Log
       log = new ConsoleLogControl();
-      var logTab = new TabPage("Debug Log")
+      var logTab = new TabPage("Console")
       {
         BackColor = SwimEditorTheme.PageBg,
         ForeColor = SwimEditorTheme.Text,
