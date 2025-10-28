@@ -71,6 +71,9 @@
     <Compile Include="DockedPanels\RenderControls\DarkScrollBar.cs">
       <SubType>Component</SubType>
     </Compile>
+    <Compile Include="DockedPanels\RenderControls\DarkTreeView.cs">
+      <SubType>Component</SubType>
+    </Compile>
     <Compile Include="DockedPanels\UtilityDock.cs">
       <SubType>Form</SubType>
     </Compile>
@@ -83,7 +86,7 @@
     <Compile Include="DockedPanels\InspectorDock.cs">
       <SubType>Form</SubType>
     </Compile>
-    <Compile Include="DockedPanels\RenderControls\ConsoleLogControls.cs">
+    <Compile Include="DockedPanels\RenderControls\ConsoleLogControl.cs">
       <SubType>UserControl</SubType>
     </Compile>
     <Compile Include="DockedPanels\RenderControls\DarkTabControl.cs">

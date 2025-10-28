@@ -16,7 +16,7 @@ namespace SwimEditor
   {
 
     private readonly SplitContainer _split;
-    private readonly TreeView _tree;
+    private readonly DarkTreeView _tree;
     private readonly ListView _list;
     private readonly ImageList _largeImages;
     private readonly ImageList _smallImages;
@@ -58,7 +58,7 @@ namespace SwimEditor
         Panel1MinSize = LeftMinPixels
       };
 
-      _tree = new TreeView
+      _tree = new DarkTreeView
       {
         Dock = DockStyle.Fill,
         HideSelection = false,
@@ -93,6 +93,7 @@ namespace SwimEditor
 
       _tree.ImageList = _smallImages;
 
+      // We are probably going to need to make this a dark list view
       _list = new ListView
       {
         Dock = DockStyle.Fill,

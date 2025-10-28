@@ -1,25 +1,19 @@
 ﻿using System;
 using System.Drawing;
 using System.Windows.Forms;
-using System.Runtime.InteropServices;
 
 namespace SwimEditor
 {
 
   /// <summary>
-  /// Custom owner-painted vertical scrollbar matching the dark editor theme.
+  /// Custom owner-painted scrollbar (vertical or horizontal) matching the dark editor theme.
   /// Auto-hides when content fits; no OS drawing, so the track never renders white.
-  /// - Keyboard support (Up/Down/PageUp/PageDown/Home/End)
-  /// - Mouse wheel on both content and host
+  /// - Keyboard support (arrows/PageUp/PageDown/Home/End per orientation)
+  /// - Mouse wheel on both content and host (updates Value directly)
   /// - Safe hook/unhook of events to avoid leaks
   /// </summary>
   public class DarkScrollBar : Control
   {
-
-    [DllImport("user32.dll")]
-    private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
-
-    private const int EM_LINESCROLL = 0x00B6;
 
     public event Action<int> ScrollValueChanged;
 
@@ -27,6 +21,11 @@ namespace SwimEditor
     public int Maximum { get; private set; } = 0; // inclusive
     public int LargeChange { get; private set; } = 1;
     public int SmallChange { get; private set; } = 1;
+
+    /// <summary>
+    /// Orientation of the scrollbar. Defaults to VerticalScroll.
+    /// </summary>
+    public ScrollOrientation Orientation { get; set; } = ScrollOrientation.VerticalScroll;
 
     /// <summary>
     /// When true (default), the control hides itself (Visible=false) if no scrolling is needed.
@@ -58,7 +57,7 @@ namespace SwimEditor
     }
 
     private bool dragging = false;
-    private int dragOffsetY = 0;
+    private int dragOffset; // X or Y depending on orientation
 
     // Stored hooks for safe unhooking
     private Control hookedControl;
@@ -106,8 +105,8 @@ namespace SwimEditor
     }
 
     /// <summary>
-    /// Hooks mouse wheel events for both the control and its host panel
-    /// so scrolling works even when focus isn't on the scrollbar.
+    /// Hooks mouse wheel events for both the control and its host panel.
+    /// This updates Value directly (no OS messages) then calls syncCallback.
     /// </summary>
     public void SetScrollHooks(Control control, Control controlHost, Action syncCallback)
     {
@@ -120,31 +119,38 @@ namespace SwimEditor
       hookedHost = controlHost;
       this.syncCallback = syncCallback;
 
-      handlerControlWheel = (s, e) =>
+      void WheelHandler(object s, MouseEventArgs e)
       {
-        int notches = e.Delta / 120;
-        int perNotch = Math.Max(1, SystemInformation.MouseWheelScrollLines);
-        int lines = -notches * perNotch; // invert: wheel up = scroll up
-        SendMessage(control.Handle, EM_LINESCROLL, IntPtr.Zero, (IntPtr)lines);
-        syncCallback();
-      };
+        if (!NeedsScroll) return;
 
-      handlerHostWheel = (s, e) =>
-      {
         int notches = e.Delta / 120;
         int perNotch = Math.Max(1, SystemInformation.MouseWheelScrollLines);
-        int lines = -notches * perNotch;
-        SendMessage(control.Handle, EM_LINESCROLL, IntPtr.Zero, (IntPtr)lines);
-        syncCallback();
-      };
+        int delta = -notches * perNotch;
+
+        if (Orientation == ScrollOrientation.VerticalScroll)
+          Value = Clamp(Value + delta, Minimum, Math.Max(Minimum, Maximum - LargeChange + 1));
+        else
+          Value = Clamp(Value + delta, Minimum, Math.Max(Minimum, Maximum - LargeChange + 1));
+
+        if (ScrollValueChanged != null)
+          ScrollValueChanged(Value);
+
+        Invalidate();
+
+        // caller syncs its view from current Value
+        this.syncCallback();
+      }
+
+      handlerControlWheel = WheelHandler;
+      handlerHostWheel = WheelHandler;
 
       control.MouseWheel += handlerControlWheel;
       controlHost.MouseWheel += handlerHostWheel;
     }
 
     /// <summary>
-    /// Keeps the host's right padding equal to the scrollbar width only when the bar is visible.
-    /// Call once after constructing the layout: vbar.HookAutoHideLayout(controlHost);
+    /// Keeps the host's padding equal to the scrollbar thickness only when the bar is visible.
+    /// Call once after constructing the layout: bar.HookAutoHideLayout(host);
     /// </summary>
     public void HookAutoHideLayout(Control host)
     {
@@ -155,8 +161,17 @@ namespace SwimEditor
       void Apply()
       {
         var p = host.Padding;
-        int right = this.Visible ? this.Width : 0;
-        host.Padding = new Padding(p.Left, p.Top, right, p.Bottom);
+
+        if (Orientation == ScrollOrientation.VerticalScroll)
+        {
+          int right = this.Visible ? this.Width : 0;
+          host.Padding = new Padding(p.Left, p.Top, right, p.Bottom);
+        }
+        else
+        {
+          int bottom = this.Visible ? this.Height : 0;
+          host.Padding = new Padding(p.Left, p.Top, p.Right, bottom);
+        }
       }
 
       handlerVisibleChanged = (s, e) => Apply();
@@ -206,13 +221,22 @@ namespace SwimEditor
       if (thumb.Contains(e.Location))
       {
         dragging = true;
-        dragOffsetY = e.Y - thumb.Y;
+        dragOffset = Orientation == ScrollOrientation.VerticalScroll ? (e.Y - thumb.Y) : (e.X - thumb.X);
         Capture = true;
       }
       else
       {
-        if (e.Y < thumb.Y) Value = Value - Math.Max(1, LargeChange - 1);
-        else Value = Value + Math.Max(1, LargeChange - 1);
+        if (Orientation == ScrollOrientation.VerticalScroll)
+        {
+          if (e.Y < thumb.Y) Value = Value - Math.Max(1, LargeChange - 1);
+          else Value = Value + Math.Max(1, LargeChange - 1);
+        }
+        else
+        {
+          if (e.X < thumb.X) Value = Value - Math.Max(1, LargeChange - 1);
+          else Value = Value + Math.Max(1, LargeChange - 1);
+        }
+        if (ScrollValueChanged != null) ScrollValueChanged(Value);
       }
       Focus(); // enable keyboard after click
     }
@@ -222,19 +246,36 @@ namespace SwimEditor
       base.OnMouseMove(e);
       if (!dragging || !NeedsScroll) return;
 
-      int trackTop = 2;
-      int trackHeight = Math.Max(1, Height - 4);
-      int thumbHeight = GetThumbHeight(trackHeight);
+      int trackPad = 2;
 
-      int y = e.Y - dragOffsetY;
-      y = Clamp(y, trackTop, trackTop + trackHeight - thumbHeight);
+      if (Orientation == ScrollOrientation.VerticalScroll)
+      {
+        int trackHeight = Math.Max(1, Height - 2 * trackPad);
+        int thumbHeight = GetThumbThickness(trackHeight);
+        int y = e.Y - dragOffset;
+        y = Clamp(y, trackPad, trackPad + trackHeight - thumbHeight);
 
-      float t = (trackHeight - thumbHeight) <= 0 ? 0f :
-                (float)(y - trackTop) / (float)(trackHeight - thumbHeight);
+        float t = (trackHeight - thumbHeight) <= 0 ? 0f :
+                  (float)(y - trackPad) / (float)(trackHeight - thumbHeight);
 
-      int maxFirst = Math.Max(Minimum, Maximum - LargeChange + 1);
-      int newVal = Minimum + (int)Math.Round(t * (maxFirst - Minimum));
-      Value = newVal;
+        int maxFirst = Math.Max(Minimum, Maximum - LargeChange + 1);
+        int newVal = Minimum + (int)Math.Round(t * (maxFirst - Minimum));
+        Value = newVal;
+      }
+      else
+      {
+        int trackWidth = Math.Max(1, Width - 2 * trackPad);
+        int thumbWidth = GetThumbThickness(trackWidth);
+        int x = e.X - dragOffset;
+        x = Clamp(x, trackPad, trackPad + trackWidth - thumbWidth);
+
+        float t = (trackWidth - thumbWidth) <= 0 ? 0f :
+                  (float)(x - trackPad) / (float)(trackWidth - thumbWidth);
+
+        int maxFirst = Math.Max(Minimum, Maximum - LargeChange + 1);
+        int newVal = Minimum + (int)Math.Round(t * (maxFirst - Minimum));
+        Value = newVal;
+      }
     }
 
     protected override void OnMouseUp(MouseEventArgs e)
@@ -254,10 +295,9 @@ namespace SwimEditor
 
       int notches = e.Delta / 120;
       int linesPerNotch = Math.Max(1, SystemInformation.MouseWheelScrollLines);
-      int deltaLines = -notches * linesPerNotch;
+      int delta = -notches * linesPerNotch;
 
-      int newValue = Value + deltaLines;
-      Value = Clamp(newValue, Minimum, Math.Max(Minimum, Maximum - LargeChange + 1));
+      Value = Clamp(Value + delta, Minimum, Math.Max(Minimum, Maximum - LargeChange + 1));
 
       if (ScrollValueChanged != null)
         ScrollValueChanged(Value);
@@ -271,6 +311,8 @@ namespace SwimEditor
       {
         case Keys.Up:
         case Keys.Down:
+        case Keys.Left:
+        case Keys.Right:
         case Keys.PageUp:
         case Keys.PageDown:
         case Keys.Home:
@@ -286,14 +328,29 @@ namespace SwimEditor
       if (!NeedsScroll) return;
 
       int v = Value;
-      switch (e.KeyCode)
+      if (Orientation == ScrollOrientation.VerticalScroll)
       {
-        case Keys.Up: v -= SmallChange; break;
-        case Keys.Down: v += SmallChange; break;
-        case Keys.PageUp: v -= Math.Max(1, LargeChange - 1); break;
-        case Keys.PageDown: v += Math.Max(1, LargeChange - 1); break;
-        case Keys.Home: v = Minimum; break;
-        case Keys.End: v = Math.Max(Minimum, Maximum - LargeChange + 1); break;
+        switch (e.KeyCode)
+        {
+          case Keys.Up: v -= SmallChange; break;
+          case Keys.Down: v += SmallChange; break;
+          case Keys.PageUp: v -= Math.Max(1, LargeChange - 1); break;
+          case Keys.PageDown: v += Math.Max(1, LargeChange - 1); break;
+          case Keys.Home: v = Minimum; break;
+          case Keys.End: v = Math.Max(Minimum, Maximum - LargeChange + 1); break;
+        }
+      }
+      else
+      {
+        switch (e.KeyCode)
+        {
+          case Keys.Left: v -= SmallChange; break;
+          case Keys.Right: v += SmallChange; break;
+          case Keys.PageUp: v -= Math.Max(1, LargeChange - 1); break;
+          case Keys.PageDown: v += Math.Max(1, LargeChange - 1); break;
+          case Keys.Home: v = Minimum; break;
+          case Keys.End: v = Math.Max(Minimum, Maximum - LargeChange + 1); break;
+        }
       }
       Value = v;
       if (ScrollValueChanged != null)
@@ -303,31 +360,54 @@ namespace SwimEditor
 
     private Rectangle GetThumbRect()
     {
-      int trackTop = 2;
-      int trackLeft = 2;
-      int trackWidth = Math.Max(1, Width - 4);
-      int trackHeight = Math.Max(1, Height - 4);
+      int pad = 2;
 
-      int thumbHeight = GetThumbHeight(trackHeight);
-      int maxFirst = Math.Max(Minimum, Maximum - LargeChange + 1);
-      float range = Math.Max(1, maxFirst - Minimum);
-
-      int y = trackTop;
-      if (range > 0)
+      if (Orientation == ScrollOrientation.VerticalScroll)
       {
-        float t = (float)(Value - Minimum) / range;
-        y = trackTop + (int)Math.Round(t * (trackHeight - thumbHeight));
-      }
+        int trackLeft = pad;
+        int trackWidth = Math.Max(1, Width - 2 * pad);
+        int trackHeight = Math.Max(1, Height - 2 * pad);
 
-      return new Rectangle(trackLeft, y, trackWidth, thumbHeight);
+        int thumbHeight = GetThumbThickness(trackHeight);
+        int maxFirst = Math.Max(Minimum, Maximum - LargeChange + 1);
+        float range = Math.Max(1, maxFirst - Minimum);
+
+        int y = pad;
+        if (range > 0)
+        {
+          float t = (float)(Value - Minimum) / range;
+          y = pad + (int)Math.Round(t * (trackHeight - thumbHeight));
+        }
+
+        return new Rectangle(trackLeft, y, trackWidth, thumbHeight);
+      }
+      else
+      {
+        int trackTop = pad;
+        int trackHeight = Math.Max(1, Height - 2 * pad);
+        int trackWidth = Math.Max(1, Width - 2 * pad);
+
+        int thumbWidth = GetThumbThickness(trackWidth);
+        int maxFirst = Math.Max(Minimum, Maximum - LargeChange + 1);
+        float range = Math.Max(1, maxFirst - Minimum);
+
+        int x = pad;
+        if (range > 0)
+        {
+          float t = (float)(Value - Minimum) / range;
+          x = pad + (int)Math.Round(t * (trackWidth - thumbWidth));
+        }
+
+        return new Rectangle(x, trackTop, thumbWidth, trackHeight);
+      }
     }
 
-    private int GetThumbHeight(int trackHeight)
+    private int GetThumbThickness(int trackSpan)
     {
       float visible = Math.Max(1, LargeChange);
       float total = Math.Max(visible, MaximumRangeCount);
-      int h = (int)Math.Round(trackHeight * (visible / total));
-      return Math.Max(18, Math.Min(trackHeight, h));
+      int t = (int)Math.Round(trackSpan * (visible / total));
+      return Math.Max(18, Math.Min(trackSpan, t));
     }
 
     private static int Clamp(int v, int a, int b)
