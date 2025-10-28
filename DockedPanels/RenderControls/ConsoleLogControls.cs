@@ -9,6 +9,12 @@ namespace SwimEditor
   /// <summary>
   /// Console-like log with a dark, owner-painted scrollbar (no white OS track).
   /// Top panel shows the log, bottom panel is a simple input bar.
+  /// - Hides native caret in the log
+  /// - Syncs a custom scrollbar to the RichTextBox
+  /// - Auto-hides the scrollbar when content fits
+  /// - Only autoscrolls when the user is already at bottom
+  /// - Bounded line count to keep perf snappy for long sessions
+  /// - Optional command history (Up/Down)
   /// </summary>
   public class ConsoleLogControl : UserControl
   {
@@ -22,12 +28,18 @@ namespace SwimEditor
     private const int EM_GETFIRSTVISIBLELINE = 0x00CE;
     private const int EM_GETLINECOUNT = 0x00BA;
     private const int EM_LINESCROLL = 0x00B6;
+    private const int WM_SETREDRAW = 0x000B;
 
     private readonly SplitContainer layout;
     private readonly Panel logHost;
     private readonly RichTextBox log;
     private readonly DarkScrollBar vbar;
     private readonly TextBox input;
+
+    private readonly System.Collections.Generic.List<string> history = new System.Collections.Generic.List<string>();
+    private int historyIndex = -1;
+
+    private int _maxLines = 5000;
 
     public event Action<string> CommandEntered;
 
@@ -69,24 +81,24 @@ namespace SwimEditor
       vbar.Width = 12;
       vbar.Dock = DockStyle.Right;
       vbar.Margin = Padding.Empty;
-      vbar.SetScrollHooks(log, logHost, SyncVBarFromControl);
+      vbar.SetScrollHooks(log, logHost, SyncBarFromControl);
       vbar.HookAutoHideLayout(logHost);
 
       logHost.Padding = new Padding(0, 0, vbar.Width, 0);
 
       // Sync RichTextBox <-> custom scrollbar
-      log.VScroll += delegate { SyncVBarFromControl(); };
-      log.TextChanged += delegate { SyncVBarFromControl(); };
-      log.Resize += delegate { SyncVBarFromControl(); };
+      log.VScroll += delegate { SyncBarFromControl(); };
+      log.TextChanged += delegate { SyncBarFromControl(); };
+      log.Resize += delegate { SyncBarFromControl(); };
       vbar.ScrollValueChanged += delegate (int newValue) { ScrollLogTo(newValue); };
 
       // Hide caret on focus interactions
-      log.GotFocus += delegate { HideCaret(log.Handle); };
-      log.Enter += delegate { HideCaret(log.Handle); };
-      log.MouseDown += delegate { HideCaret(log.Handle); };
-      log.MouseUp += delegate { HideCaret(log.Handle); };
-      log.SelectionChanged += delegate { HideCaret(log.Handle); };
-      log.MouseWheel += delegate { SyncVBarFromControl(); };
+      log.GotFocus += delegate { if (!log.IsHandleCreated) return; HideCaret(log.Handle); };
+      log.Enter += delegate { if (!log.IsHandleCreated) return; HideCaret(log.Handle); };
+      log.MouseDown += delegate { if (!log.IsHandleCreated) return; HideCaret(log.Handle); };
+      log.MouseUp += delegate { if (!log.IsHandleCreated) return; HideCaret(log.Handle); };
+      log.SelectionChanged += delegate { if (!log.IsHandleCreated) return; HideCaret(log.Handle); };
+      log.MouseWheel += delegate { SyncBarFromControl(); };
 
       logHost.Controls.Add(log);
       logHost.Controls.Add(vbar);
@@ -100,21 +112,6 @@ namespace SwimEditor
       input.AutoSize = false;
       input.Margin = new Padding(0);
       input.Height = input.PreferredHeight;
-
-      input.KeyDown += (s, e) =>
-      {
-        if (e.KeyCode == Keys.Enter)
-        {
-          e.SuppressKeyPress = true;
-          string command = input.Text;
-          if (!string.IsNullOrWhiteSpace(command))
-          {
-            AppendLine("> " + command);
-            if (CommandEntered != null) CommandEntered(command);
-            input.Clear();
-          }
-        }
-      };
 
       // Input bar (prompt + textbox)
       var inputBar = new Panel();
@@ -153,11 +150,70 @@ namespace SwimEditor
       layout.Panel2.Controls.Add(inputBar);
       Controls.Add(layout);
 
-      SyncVBarFromControl();
+      // Wire input keys (Enter submission, Up/Down history, Ctrl+L clear)
+      input.KeyDown += Input_KeyDown;
+
+      SyncBarFromControl();
     }
 
-    private void SyncVBarFromControl()
+    private void Input_KeyDown(object sender, KeyEventArgs e)
     {
+      if (e.KeyCode == Keys.Enter)
+      {
+        e.SuppressKeyPress = true;
+        string command = input.Text;
+        if (!string.IsNullOrWhiteSpace(command))
+        {
+          AppendLine("> " + command);
+          history.Add(command);
+          historyIndex = history.Count;
+          if (CommandEntered != null) CommandEntered(command);
+          input.Clear();
+          ParseEngineCommand(command); // internal 
+        }
+      }
+      else if (e.KeyCode == Keys.Up)
+      {
+        if (history.Count > 0)
+        {
+          historyIndex = Math.Max(0, historyIndex - 1);
+          input.Text = history[historyIndex];
+          input.SelectionStart = input.TextLength;
+        }
+        e.SuppressKeyPress = true;
+      }
+      else if (e.KeyCode == Keys.Down)
+      {
+        if (history.Count > 0)
+        {
+          historyIndex = Math.Min(history.Count, historyIndex + 1);
+          input.Text = (historyIndex >= history.Count) ? "" : history[historyIndex];
+          input.SelectionStart = input.TextLength;
+        }
+        e.SuppressKeyPress = true;
+      }
+      else if (e.Control && e.KeyCode == Keys.L)
+      {
+        Clear();
+        e.SuppressKeyPress = true;
+      }
+    }
+
+    private void ParseEngineCommand(string command)
+    {
+      if (command == null) return;
+
+      if (command == "cls" || command == "clear")
+      {
+        Clear();
+        return;
+      }
+    }
+
+    private void SyncBarFromControl()
+    {
+      if (!log.IsHandleCreated) return;
+
       int totalLines = Math.Max(1, (int)SendMessage(log.Handle, EM_GETLINECOUNT, IntPtr.Zero, IntPtr.Zero));
       int first = (int)SendMessage(log.Handle, EM_GETFIRSTVISIBLELINE, IntPtr.Zero, IntPtr.Zero);
       int bottomChar = log.GetCharIndexFromPosition(new Point(1, Math.Max(1, log.ClientSize.Height - 1)));
@@ -171,6 +227,8 @@ namespace SwimEditor
 
     private void ScrollLogTo(int targetFirstVisibleLine)
     {
+      if (!log.IsHandleCreated) return;
+
       int currentFirst = (int)SendMessage(log.Handle, EM_GETFIRSTVISIBLELINE, IntPtr.Zero, IntPtr.Zero);
       int delta = targetFirstVisibleLine - currentFirst;
       if (delta != 0)
@@ -180,32 +238,154 @@ namespace SwimEditor
       }
     }
 
+    /// <summary>
+    /// When appending, we only autoscroll if the user is already at the bottom.
+    /// Also trims old lines if the maximum line count is exceeded.
+    /// </summary>
     public void AppendLine(string text)
     {
-      if (log.TextLength > 0) log.AppendText(Environment.NewLine);
-      log.AppendText(text);
-      log.SelectionStart = log.TextLength;
-      log.SelectionLength = 0;
-      log.ScrollToCaret();
-      SyncVBarFromControl();
-      HideCaret(log.Handle);
+      if (log.IsDisposed) return;
+      if (!IsHandleCreated || !log.IsHandleCreated)
+      {
+        // control not ready yet; append bare
+        if (log.TextLength > 0) log.AppendText(Environment.NewLine);
+        log.AppendText(text);
+        return;
+      }
+
+      if (log.InvokeRequired)
+      {
+        log.BeginInvoke(new Action<string>(AppendLine), text);
+        return;
+      }
+
+      bool isAtBottom = IsAtBottom();
+
+      BeginUpdate();
+      try
+      {
+        if (log.TextLength > 0) log.AppendText(Environment.NewLine);
+        log.AppendText(text);
+
+        TrimLogIfNeeded();
+
+        if (isAtBottom)
+        {
+          log.SelectionStart = log.TextLength;
+          log.SelectionLength = 0;
+          log.ScrollToCaret();
+        }
+      }
+      finally
+      {
+        EndUpdate();
+        SyncBarFromControl();
+        HideCaret(log.Handle);
+      }
     }
 
+    /// <summary>
+    /// Clears the log content.
+    /// </summary>
     public void Clear()
     {
-      log.Clear();
-      SyncVBarFromControl();
+      if (log.IsDisposed) return;
+      if (log.InvokeRequired) { log.BeginInvoke(new Action(Clear)); return; }
+
+      BeginUpdate();
+      try
+      {
+        log.Clear();
+      }
+      finally
+      {
+        EndUpdate();
+        SyncBarFromControl();
+      }
     }
 
+    /// <summary>
+    /// Focuses the input box, placing caret at end.
+    /// </summary>
     public void FocusInput()
     {
       input.Focus();
       input.Select(input.TextLength, 0);
     }
 
+    /// <summary>
+    /// Maximum number of lines retained in the log (oldest are trimmed).
+    /// </summary>
+    public int MaxLines
+    {
+      get { return _maxLines; }
+      set { _maxLines = Math.Max(100, value); }
+    }
+
+    /// <summary>
+    /// Returns the entire log text.
+    /// </summary>
     public string LogText
     {
       get { return log.Text; }
+    }
+
+    private bool IsAtBottom()
+    {
+      if (!log.IsHandleCreated) return true;
+
+      int first = (int)SendMessage(log.Handle, EM_GETFIRSTVISIBLELINE, IntPtr.Zero, IntPtr.Zero);
+      int bottomChar = log.GetCharIndexFromPosition(new Point(1, Math.Max(1, log.ClientSize.Height - 1)));
+      int bottomLine = log.GetLineFromCharIndex(bottomChar);
+      int visible = Math.Max(1, bottomLine - first + 1);
+      int total = Math.Max(1, (int)SendMessage(log.Handle, EM_GETLINECOUNT, IntPtr.Zero, IntPtr.Zero));
+      return (first + visible) >= total;
+    }
+
+    private void TrimLogIfNeeded()
+    {
+      int totalLines = (int)SendMessage(log.Handle, EM_GETLINECOUNT, IntPtr.Zero, IntPtr.Zero);
+      if (totalLines <= _maxLines) return;
+
+      int removeLines = totalLines - _maxLines;
+      if (removeLines <= 0) return;
+
+      int start = log.GetFirstCharIndexFromLine(0);
+      int end = log.GetFirstCharIndexFromLine(removeLines);
+      if (end > start)
+      {
+        int selStart = log.SelectionStart;
+        int selLen = log.SelectionLength;
+
+        log.Select(start, end - start);
+        log.SelectedText = string.Empty;
+
+        // restore selection at a sensible place
+        log.SelectionStart = Math.Max(0, selStart - (end - start));
+        log.SelectionLength = selLen;
+      }
+    }
+
+    private void BeginUpdate()
+    {
+      if (!log.IsHandleCreated) return;
+      SendMessage(log.Handle, WM_SETREDRAW, IntPtr.Zero, IntPtr.Zero);
+    }
+
+    private void EndUpdate()
+    {
+      if (!log.IsHandleCreated) return;
+      SendMessage(log.Handle, WM_SETREDRAW, (IntPtr)1, IntPtr.Zero);
+      log.Invalidate();
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+      if (disposing)
+      {
+        vbar?.UnhookAll();
+      }
+      base.Dispose(disposing);
     }
 
   } // class ConsoleLogControl

@@ -9,6 +9,9 @@ namespace SwimEditor
   /// <summary>
   /// Custom owner-painted vertical scrollbar matching the dark editor theme.
   /// Auto-hides when content fits; no OS drawing, so the track never renders white.
+  /// - Keyboard support (Up/Down/PageUp/PageDown/Home/End)
+  /// - Mouse wheel on both content and host
+  /// - Safe hook/unhook of events to avoid leaks
   /// </summary>
   public class DarkScrollBar : Control
   {
@@ -57,6 +60,18 @@ namespace SwimEditor
     private bool dragging = false;
     private int dragOffsetY = 0;
 
+    // Stored hooks for safe unhooking
+    private Control hookedControl;
+    private Control hookedHost;
+    private Action syncCallback;
+
+    private MouseEventHandler handlerControlWheel;
+    private MouseEventHandler handlerHostWheel;
+
+    private EventHandler handlerVisibleChanged;
+    private EventHandler handlerSizeChanged;
+    private EventHandler handlerHostSizeChanged;
+
     public DarkScrollBar()
     {
       SetStyle(ControlStyles.AllPaintingInWmPaint |
@@ -65,7 +80,7 @@ namespace SwimEditor
                ControlStyles.ResizeRedraw, true);
 
       Cursor = Cursors.Hand;
-      TabStop = false;
+      TabStop = true; // allow keyboard
       BackColor = SwimEditorTheme.PageBg;
     }
 
@@ -96,31 +111,35 @@ namespace SwimEditor
     /// </summary>
     public void SetScrollHooks(Control control, Control controlHost, Action syncCallback)
     {
+      UnhookScrollHooks();
+
       if (control == null || controlHost == null || syncCallback == null)
         return;
 
-      // Wheel on the control -> scroll by system notch amount
-      control.MouseWheel += (s, e) =>
+      hookedControl = control;
+      hookedHost = controlHost;
+      this.syncCallback = syncCallback;
+
+      handlerControlWheel = (s, e) =>
       {
-        // 120 = one notch. Positive delta = wheel up.
         int notches = e.Delta / 120;
         int perNotch = Math.Max(1, SystemInformation.MouseWheelScrollLines);
         int lines = -notches * perNotch; // invert: wheel up = scroll up
-
         SendMessage(control.Handle, EM_LINESCROLL, IntPtr.Zero, (IntPtr)lines);
         syncCallback();
       };
 
-      // Also support wheel when hovering the empty padding area (right of log)
-      controlHost.MouseWheel += (s, e) =>
+      handlerHostWheel = (s, e) =>
       {
         int notches = e.Delta / 120;
         int perNotch = Math.Max(1, SystemInformation.MouseWheelScrollLines);
         int lines = -notches * perNotch;
-
         SendMessage(control.Handle, EM_LINESCROLL, IntPtr.Zero, (IntPtr)lines);
         syncCallback();
       };
+
+      control.MouseWheel += handlerControlWheel;
+      controlHost.MouseWheel += handlerHostWheel;
     }
 
     /// <summary>
@@ -129,6 +148,8 @@ namespace SwimEditor
     /// </summary>
     public void HookAutoHideLayout(Control host)
     {
+      UnhookAutoHideLayout();
+
       if (host == null) return;
 
       void Apply()
@@ -138,13 +159,18 @@ namespace SwimEditor
         host.Padding = new Padding(p.Left, p.Top, right, p.Bottom);
       }
 
-      // Update when visibility changes or when size/width changes
-      this.VisibleChanged += (s, e) => Apply();
-      this.SizeChanged += (s, e) => Apply();
-      host.SizeChanged += (s, e) => Apply();
+      handlerVisibleChanged = (s, e) => Apply();
+      handlerSizeChanged = (s, e) => Apply();
+      handlerHostSizeChanged = (s, e) => Apply();
+
+      this.VisibleChanged += handlerVisibleChanged;
+      this.SizeChanged += handlerSizeChanged;
+      host.SizeChanged += handlerHostSizeChanged;
 
       // Initial apply
       Apply();
+
+      hookedHost = host;
     }
 
     protected override void OnPaint(PaintEventArgs e)
@@ -188,6 +214,7 @@ namespace SwimEditor
         if (e.Y < thumb.Y) Value = Value - Math.Max(1, LargeChange - 1);
         else Value = Value + Math.Max(1, LargeChange - 1);
       }
+      Focus(); // enable keyboard after click
     }
 
     protected override void OnMouseMove(MouseEventArgs e)
@@ -225,12 +252,10 @@ namespace SwimEditor
       base.OnMouseWheel(e);
       if (!NeedsScroll) return;
 
-      // Determine direction and amount
       int notches = e.Delta / 120;
       int linesPerNotch = Math.Max(1, SystemInformation.MouseWheelScrollLines);
       int deltaLines = -notches * linesPerNotch;
 
-      // Apply movement to scrollbar value
       int newValue = Value + deltaLines;
       Value = Clamp(newValue, Minimum, Math.Max(Minimum, Maximum - LargeChange + 1));
 
@@ -238,6 +263,42 @@ namespace SwimEditor
         ScrollValueChanged(Value);
 
       Invalidate();
+    }
+
+    protected override bool IsInputKey(Keys keyData)
+    {
+      switch (keyData)
+      {
+        case Keys.Up:
+        case Keys.Down:
+        case Keys.PageUp:
+        case Keys.PageDown:
+        case Keys.Home:
+        case Keys.End:
+          return true;
+      }
+      return base.IsInputKey(keyData);
+    }
+
+    protected override void OnKeyDown(KeyEventArgs e)
+    {
+      base.OnKeyDown(e);
+      if (!NeedsScroll) return;
+
+      int v = Value;
+      switch (e.KeyCode)
+      {
+        case Keys.Up: v -= SmallChange; break;
+        case Keys.Down: v += SmallChange; break;
+        case Keys.PageUp: v -= Math.Max(1, LargeChange - 1); break;
+        case Keys.PageDown: v += Math.Max(1, LargeChange - 1); break;
+        case Keys.Home: v = Minimum; break;
+        case Keys.End: v = Math.Max(Minimum, Maximum - LargeChange + 1); break;
+      }
+      Value = v;
+      if (ScrollValueChanged != null)
+        ScrollValueChanged(Value);
+      e.Handled = true;
     }
 
     private Rectangle GetThumbRect()
@@ -276,6 +337,68 @@ namespace SwimEditor
       return v;
     }
 
-  } // class DarkVScrollBar
+    /// <summary>
+    /// Unhooks previously attached wheel hooks.
+    /// </summary>
+    public void UnhookScrollHooks()
+    {
+      if (hookedControl != null && handlerControlWheel != null)
+        hookedControl.MouseWheel -= handlerControlWheel;
+
+      if (hookedHost != null && handlerHostWheel != null)
+        hookedHost.MouseWheel -= handlerHostWheel;
+
+      hookedControl = null;
+      handlerControlWheel = null;
+
+      // keep hookedHost if used by auto-hide layout; only clear wheel handler
+      handlerHostWheel = null;
+    }
+
+    /// <summary>
+    /// Unhooks the auto-hide layout handlers.
+    /// </summary>
+    public void UnhookAutoHideLayout()
+    {
+      if (hookedHost != null)
+      {
+        if (handlerHostSizeChanged != null)
+          hookedHost.SizeChanged -= handlerHostSizeChanged;
+      }
+
+      if (handlerVisibleChanged != null)
+        this.VisibleChanged -= handlerVisibleChanged;
+
+      if (handlerSizeChanged != null)
+        this.SizeChanged -= handlerSizeChanged;
+
+      handlerVisibleChanged = null;
+      handlerSizeChanged = null;
+      handlerHostSizeChanged = null;
+      // do not null out hookedHost here if it is still used for wheel hooks
+    }
+
+    /// <summary>
+    /// Unhooks everything (wheel + layout). Call from parent Dispose().
+    /// </summary>
+    public void UnhookAll()
+    {
+      UnhookScrollHooks();
+      UnhookAutoHideLayout();
+      hookedHost = null;
+      syncCallback = null;
+      ScrollValueChanged = null;
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+      if (disposing)
+      {
+        UnhookAll();
+      }
+      base.Dispose(disposing);
+    }
+
+  } // class DarkScrollBar
 
 } // Namespace SwimEditor

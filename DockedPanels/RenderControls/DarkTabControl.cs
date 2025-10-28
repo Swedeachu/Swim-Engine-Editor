@@ -33,6 +33,7 @@ public class DarkTabControl : TabControl
   {
     base.OnCreateControl();
     ApplyThemeToPages();
+    ReflowForDpi();
   }
 
   protected override void OnControlAdded(ControlEventArgs e)
@@ -40,6 +41,12 @@ public class DarkTabControl : TabControl
     base.OnControlAdded(e);
     if (e.Control is TabPage)
       ApplyThemeToPages();
+  }
+
+  protected override void OnFontChanged(EventArgs e)
+  {
+    base.OnFontChanged(e);
+    ReflowForDpi();
   }
 
   // Inflate the page area so it covers the default 1px page border
@@ -55,7 +62,7 @@ public class DarkTabControl : TabControl
 
   protected override void OnPaintBackground(PaintEventArgs e)
   {
-    // your existing chrome fill – good to keep
+    // fill chrome around the content area to avoid any white showing through
     var g = e.Graphics;
     var cr = ClientRectangle;
     var dr = DisplayRectangle;
@@ -131,6 +138,16 @@ public class DarkTabControl : TabControl
       p.ForeColor = SwimEditorTheme.Text;
       p.Padding = new Padding(0);
     }
+  }
+
+  private void ReflowForDpi()
+  {
+    // compute a stable tab height from font metrics + padding
+    int textH = TextRenderer.MeasureText("Ag", Font).Height;
+    int vertPad = 10; // was 6, slight bump for DPI; still compact
+    int targetH = Math.Max(24, textH + vertPad);
+
+    ItemSize = new Size(ItemSize.Width, targetH);
   }
 
 }
