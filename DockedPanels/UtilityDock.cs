@@ -19,15 +19,16 @@ namespace SwimEditor
     {
       BackColor = SwimEditorTheme.Bg;
 
-      tabs = new TabControl
+      tabs = new DarkTabControl
       {
         Dock = DockStyle.Fill,
         DrawMode = TabDrawMode.OwnerDrawFixed,
-
-        SizeMode = TabSizeMode.Fixed,   // fixed height (and width, but we handle text with ellipsis)
-        ItemSize = new Size(80, 20),   // width hint; height = 30px
-        Padding = new Point(20, 6),     // inner padding of each tab (more readable)
-        HotTrack = true
+        SizeMode = TabSizeMode.Fixed,
+        ItemSize = new Size(80, 20),
+        Padding = new Point(20, 6),
+        HotTrack = true,
+        BackColor = SwimEditorTheme.Bg,
+        Margin = Padding.Empty
       };
 
       // reduce flicker on owner-draw
@@ -74,8 +75,8 @@ namespace SwimEditor
       {
         BackColor = SwimEditorTheme.PageBg,
         ForeColor = SwimEditorTheme.Text,
-        UseVisualStyleBackColor = true,
-        Padding = new Padding(0) 
+        UseVisualStyleBackColor = false,     
+        Padding = new Padding(0)
       };
 
       fileView.Dock = DockStyle.Fill;
@@ -92,6 +93,6 @@ namespace SwimEditor
     public void SetFileRoot(string path) => fileView.SetRoot(path);
     public void NavigateFileView(string path) => fileView.NavigateTo(path);
 
-  }
+  } // class UtilityDock
 
-}
+} // Namespace SwimEditor

@@ -27,7 +27,13 @@ namespace SwimEditor
     public MainWindowForm()
     {
       InitializeComponent();
+
+      this.BackColor = SwimEditorTheme.Bg;
+
       InitializeDockingUi();
+
+      dockPanel.BackColor = SwimEditorTheme.Bg;
+
       CreateAndShowPanes();
     }
 
@@ -49,6 +55,7 @@ namespace SwimEditor
       fileMenu.DropDownItems.Add("Exit");
       mainMenu.Items.Add(fileMenu);
 
+      // TODO centered and with icons like green flag, red square, etc, and a pause button somehow
       mainToolbar = new ToolStrip();
       var playButton = new ToolStripButton("Play") { DisplayStyle = ToolStripItemDisplayStyle.Text };
       var stopButton = new ToolStripButton("Stop") { DisplayStyle = ToolStripItemDisplayStyle.Text };
@@ -93,12 +100,11 @@ namespace SwimEditor
       hierarchy.Show(dockPanel, DockState.DockLeft);
       inspector.Show(dockPanel, DockState.DockRight);
 
-      // Give the bottom more verticality *before* showing console
+      // Give the bottom more verticality before showing console
       dockPanel.DockBottomPortion = 300d; // or 0.35;
       console.Show(dockPanel, DockState.DockBottom);
 
       console.AppendLog("Swim Engine Editor v1.0");
-      // for (int i = 0; i < 50; i++) { console.AppendLog("Output console test: " + i); }
 
       hierarchy.OnSelectionChanged += obj => inspector.SetInspectedObject(obj);
 
@@ -150,6 +156,7 @@ namespace SwimEditor
         // Ignore save errors
       }
     }
-  }
 
-}
+  } // class MainWindowForm
+
+} // Namespace SwimEditor

@@ -49,6 +49,6 @@ namespace SwimEditor
       propertyGrid.SelectedObject = obj;
     }
 
-  }
+  } // class InspectorDock
 
-}
+} // Namespace SwimEditor

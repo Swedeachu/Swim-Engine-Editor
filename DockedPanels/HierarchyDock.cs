@@ -8,6 +8,7 @@ namespace SwimEditor
 
   public class HierarchyDock : DockContent
   {
+
     private TreeView treeView;
 
     public event Action<object> OnSelectionChanged;
@@ -40,6 +41,7 @@ namespace SwimEditor
 
       Controls.Add(treeView);
     }
-  }
 
-}
+  } // class HierarchyDock
+
+} // Namespace SwimEditor
