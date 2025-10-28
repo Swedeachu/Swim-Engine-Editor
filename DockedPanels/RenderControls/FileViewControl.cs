@@ -1,22 +1,21 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Drawing;
-using System.IO;
-using System.Linq;
-using System.Windows.Forms;
+﻿using ReaLTaiizor.Controls;
 
 namespace SwimEditor
 {
-
   /// <summary>
-  /// Explorer-like browser: Tree (left) shows all drives and their folders/files.
-  /// List (right) shows the currently selected folder (thumbnails for images).
+  /// Explorer-like browser using CrownTreeView (left) + ListView (right).
+  /// - Left shows all drives; expanding loads children on demand (skips symlinks/reparse)
+  /// - Right shows current folder; double-click to enter / open
+  /// - Selection stays in sync both ways with re-entrancy guards (no stack overflow)
   /// </summary>
   public class FileViewControl : UserControl
   {
-
     private readonly SplitContainer _split;
-    private readonly DarkTreeView _tree;
+
+    // LEFT: CrownTreeView
+    private readonly CrownTreeView _tree;
+
+    // RIGHT: ListView + toolbar + path box
     private readonly ListView _list;
     private readonly ImageList _largeImages;
     private readonly ImageList _smallImages;
@@ -32,17 +31,21 @@ namespace SwimEditor
     private const int largeSize = 48;
     private const int smallSize = 16;
 
-    private static readonly string[] ImageExts = new[]
+    private static readonly string[] ImageExts =
     {
       ".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tif", ".tiff", ".webp"
     };
 
     // Layout prefs for initial left hierarchy width
     private const double LeftInitialPortion = 0.20; // % of control width at creation
-    private const int LeftMinPixels = 220;  // min starting width
+    private const int LeftMinPixels = 220;          // min starting width
 
     private bool _layoutInitialized = false;
     private bool _userAdjustedSplitter = false;
+
+    // Re-entrancy guards
+    private bool _suppressSelectionNavigate = false; // tree selection -> NavigateTo
+    private bool _suppressTreeSync = false;          // NavigateTo -> SelectTreeNodeForPath
 
     public FileViewControl()
     {
@@ -53,37 +56,51 @@ namespace SwimEditor
         Dock = DockStyle.Fill,
         SplitterWidth = 4,
         FixedPanel = FixedPanel.None,
-        // Start with something reasonable; will be recomputed to a percentage on handle/resize:
         SplitterDistance = 300,
         Panel1MinSize = LeftMinPixels
       };
 
-      _tree = new DarkTreeView
+      // CrownTreeView
+      _tree = new CrownTreeView
       {
         Dock = DockStyle.Fill,
-        HideSelection = false,
-        BackColor = SwimEditorTheme.PageBg,
-        ForeColor = SwimEditorTheme.Text,
-        BorderStyle = BorderStyle.None,
-        ShowRootLines = true
+        ShowIcons = true,
+        MultiSelect = false
       };
-      _tree.BeforeExpand += Tree_BeforeExpand;
-      _tree.AfterSelect += (s, e) =>
+
+      // Optional: keep this to ensure any already-expanded node with a placeholder gets populated.
+      _tree.AfterNodeExpand += (s, e) => PopulateAnyExpandedWithPlaceholder(_tree.Nodes);
+
+      // Selection -> sync right list (no expand/collapse on single click)
+      _tree.SelectedNodesChanged += (s, e) =>
       {
-        if (e.Node != null && e.Node.Tag is NodeTag)
+        var node = _tree.SelectedNodes.LastOrDefault();
+        if (node?.Tag is NodeTag tag && tag.IsDirectory && Directory.Exists(tag.Path))
         {
-          var tag = (NodeTag)e.Node.Tag;
-          if (tag.IsDirectory && Directory.Exists(tag.Path))
-            NavigateTo(tag.Path);
+          // Just navigate the right pane; do NOT change node.Expanded here.
+          NavigateTo(tag.Path);
         }
       };
-      _tree.NodeMouseDoubleClick += (s, e) =>
+
+      // Double-click in the tree = open (match right list behavior)
+      _tree.MouseDoubleClick += (s, e) =>
       {
-        if (e.Node != null && e.Node.Tag is NodeTag)
+        var node = _tree.SelectedNodes.LastOrDefault();
+        if (node?.Tag is NodeTag tag)
         {
-          var tag = (NodeTag)e.Node.Tag;
-          if (!tag.IsDirectory && File.Exists(tag.Path))
+          if (tag.IsDirectory && Directory.Exists(tag.Path))
+          {
+            // If it’s the first open, populate once here (so expand shows content immediately)
+            if (node.Nodes.Count == 1 && node.Nodes[0].Tag == null)
+              PopulateDirectoryNode(node, tag.Path);
+
+            // Navigate right pane as well
+            NavigateTo(tag.Path);
+          }
+          else if (!tag.IsDirectory && File.Exists(tag.Path))
+          {
             TryOpen(tag.Path);
+          }
         }
       };
 
@@ -91,9 +108,7 @@ namespace SwimEditor
       _smallImages = new ImageList { ImageSize = new Size(smallSize, smallSize), ColorDepth = ColorDepth.Depth32Bit };
       AddGenericIcons(_largeImages, _smallImages);
 
-      _tree.ImageList = _smallImages;
-
-      // We are probably going to need to make this a dark list view
+      // Right panel list
       _list = new ListView
       {
         Dock = DockStyle.Fill,
@@ -110,13 +125,10 @@ namespace SwimEditor
       _list.MouseDoubleClick += (s, e) =>
       {
         var hit = _list.HitTest(e.Location);
-        if (hit != null && hit.Item != null && hit.Item.Tag is string)
+        if (hit?.Item?.Tag is string path)
         {
-          var path = (string)hit.Item.Tag;
-          if (Directory.Exists(path))
-            NavigateTo(path);
-          else
-            TryOpen(path);
+          if (Directory.Exists(path)) NavigateTo(path);
+          else TryOpen(path);
         }
       };
 
@@ -135,10 +147,9 @@ namespace SwimEditor
           var current = _list.Tag as string ?? _rootPath;
           if (string.IsNullOrEmpty(current)) return;
           var parent = Directory.GetParent(current);
-          if (parent != null)
-            NavigateTo(parent.FullName);
+          if (parent != null) NavigateTo(parent.FullName);
         }
-        catch { /* ignore */ }
+        catch { }
       };
 
       var viewBtn = new ToolStripDropDownButton("View");
@@ -147,10 +158,13 @@ namespace SwimEditor
 
       large.Click += (s, e) =>
       {
+        large.Checked = true; details.Checked = false;
         _list.View = View.LargeIcon;
+        UpdateIconSpacingForCentering();
       };
       details.Click += (s, e) =>
       {
+        large.Checked = false; details.Checked = true;
         _list.View = View.Details;
         if (_list.Columns.Count == 0)
         {
@@ -159,7 +173,6 @@ namespace SwimEditor
           _list.Columns.Add("Size", 100, HorizontalAlignment.Right);
           _list.Columns.Add("Modified", 160);
         }
-        large.Checked = false; details.Checked = true;
       };
 
       _tool.Items.Add(upBtn);
@@ -176,7 +189,7 @@ namespace SwimEditor
         ForeColor = SwimEditorTheme.Text
       };
 
-      var rightPanel = new Panel { Dock = DockStyle.Fill, BackColor = SwimEditorTheme.PageBg };
+      var rightPanel = new ReaLTaiizor.Controls.Panel { Dock = DockStyle.Fill, BackColor = SwimEditorTheme.PageBg };
       rightPanel.Controls.Add(_list);
       rightPanel.Controls.Add(_pathBox);
       rightPanel.Controls.Add(_tool);
@@ -187,19 +200,9 @@ namespace SwimEditor
       Controls.Add(_split);
 
       // --- Initial left width logic ---
-      // 1) compute on first handle creation
       HandleCreated += (s, e) => ApplyInitialLeftWidth();
-      // 2) if the control resizes BEFORE the user drags, keep it proportional
-      Resize += (s, e) =>
-      {
-        if (!_userAdjustedSplitter)
-          ApplyInitialLeftWidth();
-      };
-      // 3) once the user moves the splitter, stop overriding it
-      _split.SplitterMoved += (s, e) =>
-      {
-        if (_layoutInitialized) _userAdjustedSplitter = true;
-      };
+      Resize += (s, e) => { if (!_userAdjustedSplitter) ApplyInitialLeftWidth(); };
+      _split.SplitterMoved += (s, e) => { if (_layoutInitialized) _userAdjustedSplitter = true; };
 
       // Default starting focus = running binary directory
       SetRoot(AppDomain.CurrentDomain.BaseDirectory);
@@ -207,72 +210,425 @@ namespace SwimEditor
 
     /// <summary>
     /// Sets the starting folder focus (right pane). Tree always spans ALL drives.
+    /// Ensures the path is expanded/visible in the left tree.
     /// </summary>
     public void SetRoot(string startPath)
     {
       _rootPath = startPath;
       BuildTreeForAllDrives();
-      if (Directory.Exists(_rootPath))
-        NavigateTo(_rootPath);
-      else
+
+      string target = Directory.Exists(_rootPath) ? _rootPath : DriveInfo.GetDrives().FirstOrDefault(d => d.IsReady)?.RootDirectory.FullName;
+
+      if (!string.IsNullOrEmpty(target))
       {
-        // fall back: first ready drive root
-        var first = DriveInfo.GetDrives().FirstOrDefault(d => d.IsReady);
-        if (first != null) NavigateTo(first.RootDirectory.FullName);
+        EnsurePathVisible(target);   // programmatic tree select w/ guard inside
+        NavigateTo(target);          // list refresh + guarded tree sync
+      }
+    }
+
+    // Prevent re-entrancy when we force re-expand after populating
+    private bool _reexpandGuard = false;
+
+    // Call this for every node you create (drive/folder/file).
+    private void HookNode(CrownTreeNode node)
+    {
+      node.NodeExpanded += (s, e) =>
+      {
+        var n = (CrownTreeNode)s;
+
+        if (n.Tag is NodeTag t && t.IsDirectory)
+        {
+          // If this was a placeholder, fill it once right when it expands.
+          if (n.Nodes.Count == 1 && n.Nodes[0].Tag == null)
+          {
+            PopulateDirectoryNode(n, t.Path);
+
+            // After we swap in real children, some trees lose the expanded visual state.
+            // Force it to remain expanded exactly once to avoid the “click twice” issue.
+            if (!_reexpandGuard)
+            {
+              try
+              {
+                _reexpandGuard = true;
+                n.Expanded = true;   // keep it open now that it has real kids
+              }
+              finally
+              {
+                _reexpandGuard = false;
+              }
+            }
+
+            // Make sure it repaints with the new children immediately.
+            _tree.Invalidate();
+          }
+        }
+      };
+
+      node.NodeCollapsed += (s, e) =>
+      {
+        // No-op; we only care about fixing the expand timing.
+      };
+    }
+
+    // ---------- Crown tree helpers ----------
+
+    private class NodeTag
+    {
+      public string Path;
+      public bool IsDirectory;
+      public NodeTag(string path, bool isDir) { Path = path; IsDirectory = isDir; }
+    }
+
+    private void BuildTreeForAllDrives()
+    {
+      _tree.Nodes.Clear();
+
+      var root = new CrownTreeNode("This PC")
+      {
+        Tag = new NodeTag("", true),
+        Icon = (Bitmap)_smallImages.Images["COMPUTER"]
+      };
+      HookNode(root);
+      _tree.Nodes.Add(root);
+
+      foreach (var di in DriveInfo.GetDrives())
+      {
+        var driveNode = MakeDriveNode(di);
+        root.Nodes.Add(driveNode);
+
+        // Show expand arrow (populate on-demand)
+        AddPlaceholder(driveNode);
+      }
+
+      root.Expanded = true;
+    }
+
+    private CrownTreeNode MakeDriveNode(DriveInfo di)
+    {
+      string label;
+      try
+      {
+        var vol = di.IsReady ? di.VolumeLabel : "";
+        label = string.IsNullOrEmpty(vol)
+          ? $"{di.Name.TrimEnd('\\')}"
+          : $"{vol} ({di.Name.TrimEnd('\\')})";
+      }
+      catch
+      {
+        label = di.Name.TrimEnd('\\');
+      }
+
+      var node = new CrownTreeNode(label)
+      {
+        Tag = new NodeTag(di.RootDirectory.FullName, isDir: true),
+        Icon = (Bitmap)_smallImages.Images["DRIVE"]
+      };
+
+      HookNode(node);
+      return node;
+    }
+
+    private CrownTreeNode MakeDirNode(string path)
+    {
+      var name = Path.GetFileName(path);
+      if (string.IsNullOrEmpty(name)) name = path;
+
+      var node = new CrownTreeNode(name)
+      {
+        Tag = new NodeTag(path, isDir: true),
+        Icon = (Bitmap)_smallImages.Images["FOLDER"]
+      };
+
+      HookNode(node);
+      return node;
+    }
+
+
+    private CrownTreeNode MakeFileNode(string path)
+    {
+      var name = Path.GetFileName(path);
+      var key = EnsureImageKeyForPath(path);
+      return new CrownTreeNode(name)
+      {
+        Tag = new NodeTag(path, isDir: false),
+        Icon = (Bitmap)_smallImages.Images[key]
+      };
+    }
+
+    /// <summary>Adds a dummy child so the node shows an expand arrow.</summary>
+    private static void AddPlaceholder(CrownTreeNode node)
+    {
+      if (node.Nodes.Count == 0)
+      {
+        var dummy = new CrownTreeNode(string.Empty) { Tag = null };
+        node.Nodes.Add(dummy);
       }
     }
 
     /// <summary>
-    /// Applies the initial left-panel width as a percentage of the control,
-    /// clamped by a minimum pixel width. Stops re-applying once the user moves the splitter.
+    /// Populate a directory node with children (dirs + files), skipping only reparse points.
     /// </summary>
-    private void ApplyInitialLeftWidth()
+    private void PopulateDirectoryNode(CrownTreeNode node, string dirPath)
     {
-      if (!IsHandleCreated || _split == null) return;
+      node.Nodes.Clear();
 
-      int total = Math.Max(1, _split.ClientSize.Width);
-      int min1 = Math.Max(0, _split.Panel1MinSize);
-      int min2 = Math.Max(0, _split.Panel2MinSize);
-      int splitterW = Math.Max(0, _split.SplitterWidth);
-
-      // Compute desired width as a percentage of total
-      int desired = Math.Max(LeftMinPixels, (int)Math.Round(total * LeftInitialPortion));
-
-      // Compute the *maximum* allowed SplitterDistance
-      int maxAllowed = Math.Max(min1, total - min2 - splitterW);
-
-      // Handle very small total width edge cases
-      if (total <= (min1 + min2 + splitterW))
-        desired = min1;
-      else
-        desired = Clamp(desired, min1, maxAllowed);
-
-      // Apply only if valid and different
-      if (desired >= min1 && desired <= maxAllowed && _split.SplitterDistance != desired)
+      if (!TryGetDirEntries(dirPath, out var dirs, out var files))
       {
-        try
-        {
-          _split.SplitterDistance = desired;
-        }
-        catch
-        {
-          // fallback just in case (avoids crash)
-          _split.SplitterDistance = min1;
-        }
+        return;
       }
 
-      _layoutInitialized = true;
+      foreach (var dir in dirs)
+      {
+        var child = MakeDirNode(dir);
+        if (TryHasAnyChild(dir)) AddPlaceholder(child);
+        node.Nodes.Add(child);
+      }
+
+      foreach (var file in files)
+      {
+        var child = MakeFileNode(file); // files don't expand; no need to hook here
+        node.Nodes.Add(child);
+      }
+    }
+
+    private static bool PathStartsWith(string fullPath, string prefixPath)
+    {
+      if (string.IsNullOrWhiteSpace(fullPath) || string.IsNullOrWhiteSpace(prefixPath))
+        return false;
+
+      try
+      {
+        string full = Path.GetFullPath(fullPath)
+                          .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+
+        string prefix = Path.GetFullPath(prefixPath)
+                            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+
+        // "C:" -> "C:\"
+        if (prefix.Length == 2 && prefix[1] == ':')
+          prefix += Path.DirectorySeparatorChar;
+
+        // Exact folder match
+        if (string.Equals(full, prefix, StringComparison.OrdinalIgnoreCase))
+          return true;
+
+        // Ensure prefix ends with separator, then compare
+        if (!prefix.EndsWith(Path.DirectorySeparatorChar.ToString()) &&
+            !prefix.EndsWith(Path.AltDirectorySeparatorChar.ToString()))
+          prefix += Path.DirectorySeparatorChar;
+
+        return full.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
+      }
+      catch
+      {
+        return false;
+      }
     }
 
     /// <summary>
-    /// Helper for compatibility with pre-.NET Core versions
+    /// Finds/creates all segments of a path inside the tree, expanding them; selects final node.
+    /// Programmatic selection is guarded to avoid re-entrancy into NavigateTo.
     /// </summary>
-    private static int Clamp(int value, int min, int max)
+    private void EnsurePathVisible(string path)
     {
-      if (value < min) return min;
-      if (value > max) return max;
-      return value;
+      if (string.IsNullOrWhiteSpace(path)) return;
+
+      var root = _tree.Nodes.FirstOrDefault(); // "This PC"
+      if (root == null) return;
+
+      // 1) Pick drive node
+      var drive = DriveInfo.GetDrives()
+                           .FirstOrDefault(d => PathStartsWith(path, d.RootDirectory.FullName));
+      if (drive == null) return;
+
+      var driveNode = root.Nodes.FirstOrDefault(n =>
+      {
+        if (n.Tag is NodeTag t) return SameDir(t.Path, drive.RootDirectory.FullName);
+        return false;
+      });
+
+      if (driveNode == null) return;
+
+      // Populate drive content if still placeholder
+      if (driveNode.Nodes.Count == 1 && driveNode.Nodes[0].Tag == null)
+        PopulateDirectoryNode(driveNode, drive.RootDirectory.FullName);
+
+      driveNode.Expanded = true;
+
+      // 2) Walk each directory segment relative to drive root
+      string rel = GetRelativePathSafe(drive.RootDirectory.FullName, path);
+      if (string.IsNullOrEmpty(rel))
+      {
+        ProgrammaticSelect(driveNode);
+        return;
+      }
+
+      var parts = rel.Split(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar },
+                            StringSplitOptions.RemoveEmptyEntries);
+
+      CrownTreeNode current = driveNode;
+      string curPath = drive.RootDirectory.FullName.TrimEnd(Path.DirectorySeparatorChar);
+
+      foreach (var part in parts)
+      {
+        curPath = Path.Combine(curPath, part);
+
+        // Populate current if still placeholder
+        if (current.Nodes.Count == 1 && current.Nodes[0].Tag == null)
+          PopulateDirectoryNode(current, (current.Tag as NodeTag)?.Path);
+
+        // Find (or add) this segment
+        var next = current.Nodes.FirstOrDefault(n =>
+        {
+          if (n.Tag is NodeTag t) return t.IsDirectory && SameDir(t.Path, curPath);
+          return false;
+        });
+
+        if (next == null && Directory.Exists(curPath))
+        {
+          next = MakeDirNode(curPath);
+          if (TryHasAnyChild(curPath)) AddPlaceholder(next);
+          current.Nodes.Add(next);
+        }
+
+        if (next == null) break;
+
+        current = next;
+        current.Expanded = true;
+      }
+
+      ProgrammaticSelect(current ?? driveNode);
     }
+
+    private void ProgrammaticSelect(CrownTreeNode node)
+    {
+      if (node == null) return;
+      try
+      {
+        _suppressSelectionNavigate = true;
+        _tree.SelectNode(node);
+        _tree.EnsureVisible();
+      }
+      finally
+      {
+        _suppressSelectionNavigate = false;
+      }
+    }
+
+    private static string GetRelativePathSafe(string root, string target)
+    {
+      try
+      {
+        var fullRoot = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        var fullTarget = Path.GetFullPath(target);
+        if (!fullTarget.StartsWith(fullRoot, StringComparison.OrdinalIgnoreCase)) return string.Empty;
+        return fullTarget.Substring(fullRoot.Length);
+      }
+      catch { return string.Empty; }
+    }
+
+    private static bool SameDir(string a, string b)
+    {
+      try
+      {
+        a = Path.GetFullPath(a.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        b = Path.GetFullPath(b.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        return string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+      }
+      catch { return false; }
+    }
+
+    private void PopulateAnyExpandedWithPlaceholder(IEnumerable<CrownTreeNode> nodes)
+    {
+      foreach (var n in nodes)
+      {
+        if (n?.Tag is NodeTag t && t.IsDirectory && n.Expanded)
+        {
+          if (n.Nodes.Count == 1 && n.Nodes[0].Tag == null)
+            PopulateDirectoryNode(n, t.Path);
+        }
+        if (n != null && n.Nodes != null && n.Nodes.Count > 0)
+          PopulateAnyExpandedWithPlaceholder(n.Nodes);
+      }
+    }
+
+    // Safe, single-pass enumeration; skip reparse points (symlinks/junctions)
+    private static bool TryGetDirEntries(string dirPath, out List<string> subDirs, out List<string> files)
+    {
+      subDirs = new List<string>();
+      files = new List<string>();
+
+      try
+      {
+        var di = new DirectoryInfo(dirPath);
+        if (!di.Exists) return false;
+
+        IEnumerable<string> dirEnum;
+        try { dirEnum = Directory.EnumerateDirectories(dirPath); }
+        catch { return false; }
+
+        foreach (var d in dirEnum)
+        {
+          try
+          {
+            var child = new DirectoryInfo(d);
+            if (!child.Exists) continue;
+
+            var childAttr = child.Attributes;
+            if ((childAttr & FileAttributes.ReparsePoint) != 0)
+              continue;
+
+            subDirs.Add(d);
+            if (subDirs.Count >= MaxTreeChildrenPerFolder) break;
+          }
+          catch { /* skip */ }
+        }
+
+        if (subDirs.Count < MaxTreeChildrenPerFolder)
+        {
+          IEnumerable<string> fileEnum;
+          try { fileEnum = Directory.EnumerateFiles(dirPath); }
+          catch { fileEnum = Array.Empty<string>(); }
+
+          foreach (var f in fileEnum)
+          {
+            try
+            {
+              files.Add(f);
+              if (subDirs.Count + files.Count >= MaxTreeChildrenPerFolder) break;
+            }
+            catch { /* skip */ }
+          }
+        }
+
+        return true;
+      }
+      catch
+      {
+        return false;
+      }
+    }
+
+    private static bool TryHasAnyChild(string dirPath)
+    {
+      try
+      {
+        using var e = Directory.EnumerateFileSystemEntries(dirPath).GetEnumerator();
+        return e.MoveNext();
+      }
+      catch
+      {
+        return false;
+      }
+    }
+
+    private void SelectTreeNodeForPath(string path)
+    {
+      if (_suppressTreeSync) return;
+      EnsurePathVisible(path);
+    }
+
+    // ---------- Right-pane navigation ----------
 
     /// <summary>Navigates the right pane to a given path (must exist).</summary>
     public void NavigateTo(string path)
@@ -286,41 +642,52 @@ namespace SwimEditor
         _list.Tag = path;
         _pathBox.Text = path;
 
-        // Folders first
-        foreach (var dir in SafeEnum(() => Directory.EnumerateDirectories(path)))
+        IEnumerable<string> dirs = Array.Empty<string>();
+        IEnumerable<string> files = Array.Empty<string>();
+        try { dirs = Directory.EnumerateDirectories(path); } catch { }
+        try { files = Directory.EnumerateFiles(path); } catch { }
+
+        foreach (var dir in dirs)
         {
-          var name = Path.GetFileName(dir);
-          var item = new ListViewItem(name)
+          try
           {
-            Tag = dir,
-            ImageKey = "FOLDER"
-          };
-          if (_list.View == View.Details)
-          {
-            item.SubItems.Add("Folder");
-            item.SubItems.Add("");
-            item.SubItems.Add(GetWriteTime(dir));
+            var name = Path.GetFileName(dir);
+            var item = new ListViewItem(name)
+            {
+              Tag = dir,
+              ImageKey = "FOLDER"
+            };
+            if (_list.View == View.Details)
+            {
+              item.SubItems.Add("Folder");
+              item.SubItems.Add("");
+              item.SubItems.Add(GetWriteTime(dir));
+            }
+            _list.Items.Add(item);
           }
-          _list.Items.Add(item);
+          catch { }
         }
 
-        // Files
-        foreach (var file in SafeEnum(() => Directory.EnumerateFiles(path)))
+        foreach (var file in files)
         {
-          var name = Path.GetFileName(file);
-          var key = EnsureImageKeyForPath(file);
-          var item = new ListViewItem(name)
+          try
           {
-            Tag = file,
-            ImageKey = key
-          };
-          if (_list.View == View.Details)
-          {
-            item.SubItems.Add(Path.GetExtension(file).ToUpperInvariant() + " File");
-            item.SubItems.Add(GetFileSize(file));
-            item.SubItems.Add(GetWriteTime(file));
+            var name = Path.GetFileName(file);
+            var key = EnsureImageKeyForPath(file);
+            var item = new ListViewItem(name)
+            {
+              Tag = file,
+              ImageKey = key
+            };
+            if (_list.View == View.Details)
+            {
+              item.SubItems.Add(Path.GetExtension(file).ToUpperInvariant() + " File");
+              item.SubItems.Add(GetFileSize(file));
+              item.SubItems.Add(GetWriteTime(file));
+            }
+            _list.Items.Add(item);
           }
-          _list.Items.Add(item);
+          catch { }
         }
       }
       finally
@@ -328,242 +695,19 @@ namespace SwimEditor
         _list.EndUpdate();
       }
 
-      // keep tree selection synced
-      SelectTreeNodeForPath(path);
-
-      // If we're in LargeIcon view, recompute spacing so the grid is centered
-      if (_list.View == View.LargeIcon)
-        UpdateIconSpacingForCentering();
-    }
-
-    // ---------- internals ----------
-
-    private void BuildTreeForAllDrives()
-    {
-      _tree.BeginUpdate();
+      // keep tree selection synced and expanded along the path (guarded)
       try
       {
-        _tree.Nodes.Clear();
-
-        // Optional "This PC" grouping node
-        var root = new TreeNode("This PC")
-        {
-          ForeColor = SwimEditorTheme.Text,
-          ImageKey = "COMPUTER",
-          SelectedImageKey = "COMPUTER"
-        };
-        _tree.Nodes.Add(root);
-
-        foreach (var di in DriveInfo.GetDrives())
-        {
-          // Only show drives that exist; show even if not ready (no media)
-          var driveNode = MakeDriveNode(di);
-          root.Nodes.Add(driveNode);
-
-          // Ready drives get a placeholder so they can be expanded
-          if (di.IsReady) AddPlaceholders(driveNode);
-        }
-
-        root.Expand();
+        _suppressTreeSync = true;
+        SelectTreeNodeForPath(path);
       }
       finally
       {
-        _tree.EndUpdate();
-      }
-    }
-
-    private class NodeTag
-    {
-      public string Path;
-      public bool IsDirectory;
-      public NodeTag(string path, bool isDir) { Path = path; IsDirectory = isDir; }
-    }
-
-    private TreeNode MakeDriveNode(DriveInfo di)
-    {
-      string label;
-      try
-      {
-        var vol = "";
-        if (di.IsReady)
-          vol = di.VolumeLabel;
-        label = string.IsNullOrEmpty(vol)
-          ? $"{di.Name.TrimEnd('\\')}"
-          : $"{vol} ({di.Name.TrimEnd('\\')})";
-      }
-      catch
-      {
-        label = di.Name.TrimEnd('\\');
+        _suppressTreeSync = false;
       }
 
-      var node = new TreeNode(label)
-      {
-        Tag = new NodeTag(di.RootDirectory.FullName, isDir: true),
-        ForeColor = SwimEditorTheme.Text,
-        ImageKey = "DRIVE",
-        SelectedImageKey = "DRIVE"
-      };
-      return node;
-    }
-
-    private TreeNode MakeDirNode(string path)
-    {
-      var name = Path.GetFileName(path);
-      if (string.IsNullOrEmpty(name)) name = path;
-      var node = new TreeNode(name)
-      {
-        Tag = new NodeTag(path, isDir: true),
-        ForeColor = SwimEditorTheme.Text,
-        ImageKey = "FOLDER",
-        SelectedImageKey = "FOLDER"
-      };
-      return node;
-    }
-
-    private TreeNode MakeFileNode(string path)
-    {
-      var name = Path.GetFileName(path);
-      var key = EnsureImageKeyForPath(path);
-      var node = new TreeNode(name)
-      {
-        Tag = new NodeTag(path, isDir: false),
-        ForeColor = SwimEditorTheme.Text,
-        ImageKey = key,
-        SelectedImageKey = key
-      };
-      return node;
-    }
-
-    /// <summary>Adds a dummy child so the node shows an expand arrow.</summary>
-    private static void AddPlaceholder(TreeNode node)
-    {
-      if (node.Nodes.Count == 0)
-        node.Nodes.Add(new TreeNode { Tag = null }); // dummy
-    }
-
-    private void AddPlaceholders(TreeNode node)
-    {
-      try
-      {
-        var tag = node.Tag as NodeTag;
-        var path = tag != null ? tag.Path : null;
-        if (string.IsNullOrEmpty(path)) return;
-
-        bool hasChild =
-          SafeEnum(() => Directory.EnumerateDirectories(path)).Take(1).Any() ||
-          SafeEnum(() => Directory.EnumerateFiles(path)).Take(1).Any();
-
-        if (hasChild) AddPlaceholder(node);
-      }
-      catch { /* ignore */ }
-    }
-
-    private void Tree_BeforeExpand(object sender, TreeViewCancelEventArgs e)
-    {
-      var tag = e.Node != null ? e.Node.Tag as NodeTag : null;
-      if (tag == null || !tag.IsDirectory)
-        return;
-
-      // If this node still has the single dummy child, replace with actual content
-      if (e.Node.Nodes.Count == 1 && e.Node.Nodes[0].Tag == null)
-      {
-        PopulateDirectoryNode(e.Node, tag.Path);
-      }
-    }
-
-    private void PopulateDirectoryNode(TreeNode node, string dirPath)
-    {
-      node.Nodes.Clear();
-
-      int added = 0;
-
-      // Subdirectories
-      foreach (var dir in SafeEnum(() => Directory.EnumerateDirectories(dirPath)))
-      {
-        var child = MakeDirNode(dir);
-        AddPlaceholders(child);
-        node.Nodes.Add(child);
-        added++;
-        if (added >= MaxTreeChildrenPerFolder) break;
-      }
-
-      // Files (as leaf nodes)
-      if (added < MaxTreeChildrenPerFolder)
-      {
-        foreach (var file in SafeEnum(() => Directory.EnumerateFiles(dirPath)))
-        {
-          var child = MakeFileNode(file);
-          node.Nodes.Add(child);
-          added++;
-          if (added >= MaxTreeChildrenPerFolder) break;
-        }
-      }
-
-      // Ellipsis node if we truncated
-      int remaining =
-        CountSafe(() => Directory.EnumerateDirectories(dirPath)) +
-        CountSafe(() => Directory.EnumerateFiles(dirPath)) - added;
-
-      if (remaining > 0)
-      {
-        var more = new TreeNode($"… ({remaining} more)") { ForeColor = Color.Gray };
-        node.Nodes.Add(more);
-      }
-    }
-
-    private void SelectTreeNodeForPath(string path)
-    {
-      TreeNode found = FindNodeByPath(_tree.Nodes, path);
-      if (found != null)
-      {
-        _tree.SelectedNode = found;
-        found.EnsureVisible();
-      }
-    }
-
-    private TreeNode FindNodeByPath(TreeNodeCollection nodes, string path)
-    {
-      foreach (TreeNode n in nodes)
-      {
-        var tag = n.Tag as NodeTag;
-
-        if (tag != null && tag.IsDirectory &&
-            string.Equals(NormalizeDir(tag.Path), NormalizeDir(path), StringComparison.OrdinalIgnoreCase))
-          return n;
-
-        if (tag != null && tag.IsDirectory && PathStartsWith(path, tag.Path))
-        {
-          // Ensure children are populated before searching deeper
-          if (n.Nodes.Count == 1 && n.Nodes[0].Tag == null)
-            PopulateDirectoryNode(n, tag.Path);
-
-          var child = FindNodeByPath(n.Nodes, path);
-          if (child != null) return child;
-        }
-
-        // Recurse into "This PC"
-        var childSearch = FindNodeByPath(n.Nodes, path);
-        if (childSearch != null) return childSearch;
-      }
-      return null;
-    }
-
-    private static string NormalizeDir(string p)
-    {
-      if (string.IsNullOrEmpty(p)) return p;
-      return p.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-    }
-
-    private static bool PathStartsWith(string full, string prefix)
-    {
-      try
-      {
-        var f = Path.GetFullPath(full).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        var p = Path.GetFullPath(prefix).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        if (p.Length == 2 && p[1] == ':') p += Path.DirectorySeparatorChar; // "C:" -> "C:\"
-        return f.StartsWith(p, StringComparison.OrdinalIgnoreCase);
-      }
-      catch { return false; }
+      if (_list.View == View.LargeIcon)
+        UpdateIconSpacingForCentering();
     }
 
     private string EnsureImageKeyForPath(string filePath)
@@ -721,31 +865,17 @@ namespace SwimEditor
           UseShellExecute = true
         });
       }
-      catch { /* ignore */ }
-    }
-
-    private static IEnumerable<string> SafeEnum(Func<IEnumerable<string>> getter)
-    {
-      try { return getter() ?? Enumerable.Empty<string>(); }
-      catch { return Enumerable.Empty<string>(); }
-    }
-
-    private static int CountSafe(Func<IEnumerable<string>> getter)
-    {
-      try { return getter()?.Count() ?? 0; }
-      catch { return 0; }
+      catch { }
     }
 
     // --- ListView large-icon centering machinery ---
 
-    // Win32 interop: set icon spacing in LargeIcon/SmallIcon views.
     [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Auto)]
     private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
 
     private const int LVM_FIRST = 0x1000;
-    private const int LVM_SETICONSPACING = LVM_FIRST + 53; // insane magic number
+    private const int LVM_SETICONSPACING = LVM_FIRST + 53;
 
-    // Packs two 16-bit values into an IntPtr (low = x, high = y)
     private static IntPtr PackToLParam(int x, int y)
     {
       unchecked
@@ -755,31 +885,20 @@ namespace SwimEditor
       }
     }
 
-    /// <summary>
-    /// Computes and applies horizontal/vertical icon spacing so that the
-    /// icon grid appears visually centered when there is extra width.
-    /// </summary>
     private void UpdateIconSpacingForCentering()
     {
       if (!IsHandleCreated || !_list.IsHandleCreated) return;
       if (_list.View != View.LargeIcon) return;
 
-      // Base cell size: image plus a bit of margin for text.
-      //  - Horizontal: image width + ~ (text margin + inter-item gap)
-      //  - Vertical:   image height + text line + gap
-      // Tune these constants if you change image size or font.
       int imgW = _list.LargeImageList?.ImageSize.Width ?? largeSize;
       int imgH = _list.LargeImageList?.ImageSize.Height ?? largeSize;
 
-      int baseCellW = imgW + largeSize;  // ~= left/right padding + gap between items
-      int baseCellH = imgH + (largeSize - 12);  // ~= caption height + vertical gap
+      int baseCellW = imgW + largeSize;              // ~= left/right padding + gap
+      int baseCellH = imgH + (largeSize - 12);       // ~= caption + gap
 
       int viewW = Math.Max(1, _list.ClientSize.Width);
-
-      // How many columns would fit at the base spacing?
       int cols = Math.Max(1, viewW / baseCellW);
 
-      // If only one column fits, we still want a little side padding:
       if (cols <= 1)
       {
         int cx = Math.Min(viewW - (smallSize / 2), baseCellW);
@@ -788,19 +907,57 @@ namespace SwimEditor
         return;
       }
 
-      // Distribute the leftover width as extra horizontal spacing
       int used = cols * baseCellW;
       int leftover = Math.Max(0, viewW - used);
-
-      // Spread the leftover into (cols + 1) gaps; add half to each item cell to emulate centering.
-      // We implement that by increasing the icon cell width (cx).
       int gap = leftover / (cols + 1);
       int cxFinal = baseCellW + gap;
 
-      // Apply; cy stays constant.
       SendMessage(_list.Handle, LVM_SETICONSPACING, IntPtr.Zero, PackToLParam(cxFinal, baseCellH));
     }
 
-  } // class FileViewControl
+    /// <summary>
+    /// Applies the initial left-panel width as a percentage of the control,
+    /// clamped by a minimum pixel width. Stops re-applying once the user moves the splitter.
+    /// </summary>
+    private void ApplyInitialLeftWidth()
+    {
+      if (!IsHandleCreated || _split == null) return;
 
-} // Namespace SwimEditor
+      int total = Math.Max(1, _split.ClientSize.Width);
+      int min1 = Math.Max(0, _split.Panel1MinSize);
+      int min2 = Math.Max(0, _split.Panel2MinSize);
+      int splitterW = Math.Max(0, _split.SplitterWidth);
+
+      int desired = Math.Max(LeftMinPixels, (int)Math.Round(total * LeftInitialPortion));
+      int maxAllowed = Math.Max(min1, total - min2 - splitterW);
+
+      if (total <= (min1 + min2 + splitterW))
+        desired = min1;
+      else
+        desired = Clamp(desired, min1, maxAllowed);
+
+      if (desired >= min1 && desired <= maxAllowed && _split.SplitterDistance != desired)
+      {
+        try
+        {
+          _split.SplitterDistance = desired;
+        }
+        catch
+        {
+          _split.SplitterDistance = min1;
+        }
+      }
+
+      _layoutInitialized = true;
+    }
+
+    private static int Clamp(int value, int min, int max)
+    {
+      if (value < min) return min;
+      if (value > max) return max;
+      return value;
+    }
+
+  }
+
+}

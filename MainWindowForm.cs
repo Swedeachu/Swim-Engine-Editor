@@ -31,46 +31,87 @@ namespace SwimEditor
       CreateAndShowPanes();
     }
 
+    // TODO: top bar for like file, settings, etc in top left corner
     private void InitializeDockingUi()
     {
       Text = "Swim Engine Editor v1.0";
       WindowState = FormWindowState.Maximized;
       IsMdiContainer = true;
 
-      theme = new VS2015DarkTheme(); 
+      theme = new VS2015DarkTheme();
 
-      // TODO centered and with icons like green flag, red square, etc, and a pause button somehow
-      mainToolbar = new CrownToolStrip
+      // Non-selectable host bar (no Crown header/blue line)
+      var topBar = new System.Windows.Forms.Panel
       {
         Dock = DockStyle.Top,
-        GripStyle = ToolStripGripStyle.Hidden,
+        Height = 44,
         BackColor = SwimEditorTheme.Bg,
-        ForeColor = SwimEditorTheme.Text,
-        Padding = new Padding(6, 2, 6, 2)
+        Margin = Padding.Empty,
+        Padding = Padding.Empty,
+        TabStop = false
       };
 
-      var playButton = new ToolStripButton("Play")
+      // Centered row of buttons
+      var centerRow = new System.Windows.Forms.FlowLayoutPanel
       {
-        DisplayStyle = ToolStripItemDisplayStyle.Text,
-        ForeColor = SwimEditorTheme.Text
+        AutoSize = true,
+        AutoSizeMode = AutoSizeMode.GrowAndShrink,
+        WrapContents = false,
+        Margin = Padding.Empty,
+        Padding = Padding.Empty,
+        BackColor = Color.Transparent
       };
 
-      var stopButton = new ToolStripButton("Stop")
+      CrownButton MakeBtn(string text)
       {
-        DisplayStyle = ToolStripItemDisplayStyle.Text,
-        ForeColor = SwimEditorTheme.Text
-      };
+        var btn = new CrownButton
+        {
+          Text = text,
+          AutoSize = false,
+          Size = new Size(96, 28),
+          Margin = new Padding(8, 8, 8, 8),
+          Padding = new Padding(10, 2, 10, 2),
+          BackColor = SwimEditorTheme.Bg,
+          ForeColor = SwimEditorTheme.Text,
+          TabStop = false  // prevents focus and thus avoids blue outline
+        };
 
-      // Optional simple accent cues on hover/click (Crown respects ToolStrip rendermode/colors)
-      playButton.MouseEnter += (s, e) => playButton.ForeColor = SwimEditorTheme.Accent;
-      playButton.MouseLeave += (s, e) => playButton.ForeColor = SwimEditorTheme.Text;
-      stopButton.MouseEnter += (s, e) => stopButton.ForeColor = SwimEditorTheme.Accent;
-      stopButton.MouseLeave += (s, e) => stopButton.ForeColor = SwimEditorTheme.Text;
+        // Disable any remaining focus/hover highlight
+        btn.GotFocus += (s, e) => btn.TabStop = false;
 
-      mainToolbar.Items.Add(playButton);
-      mainToolbar.Items.Add(stopButton);
+        return btn;
+      }
 
-      // DockPanel (center workspace)
+      var playButton = MakeBtn("Play");
+      var pauseButton = MakeBtn("Pause");
+      var stopButton = MakeBtn("Stop");
+
+      // subtle hover cue
+      void AccentOn(object? s, EventArgs e) => ((CrownButton)s!).ForeColor = SwimEditorTheme.Accent;
+      void AccentOff(object? s, EventArgs e) => ((CrownButton)s!).ForeColor = SwimEditorTheme.Text;
+      foreach (var b in new[] { playButton, pauseButton, stopButton })
+      {
+        b.MouseEnter += AccentOn;
+        b.MouseLeave += AccentOff;
+      }
+
+      centerRow.Controls.Add(playButton);
+      centerRow.Controls.Add(pauseButton);
+      centerRow.Controls.Add(stopButton);
+
+      // center the row within the bar
+      void LayoutCenter()
+      {
+        var pref = centerRow.PreferredSize;
+        int x = Math.Max(0, (topBar.ClientSize.Width - pref.Width) / 2);
+        int y = Math.Max(0, (topBar.ClientSize.Height - pref.Height) / 2);
+        centerRow.Location = new Point(x, y);
+      }
+      topBar.Controls.Add(centerRow);
+      topBar.Resize += (s, e) => LayoutCenter();
+      LayoutCenter();
+
+      // DockPanel workspace
       dockPanel = new DockPanel
       {
         Dock = DockStyle.Fill,
@@ -79,16 +120,12 @@ namespace SwimEditor
         BackColor = SwimEditorTheme.Bg
       };
 
-      // Add controls in this order so menu/toolstrip sit at top, dock fills the rest
       Controls.Add(dockPanel);
-      Controls.Add(mainToolbar);
+      Controls.Add(topBar);
 
-      MainMenuStrip = mainMenu;
-
-      // Layout persistence path
       string appData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
       layoutPath = Path.Combine(appData, "SwimEditor", "layout.xml");
-      Directory.CreateDirectory(Path.GetDirectoryName(layoutPath));
+      Directory.CreateDirectory(Path.GetDirectoryName(layoutPath)!);
     }
 
     // TODO: serialize each panels width and height on last program close and their position and dock state
