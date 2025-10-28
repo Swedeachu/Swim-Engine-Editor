@@ -109,7 +109,7 @@ namespace SwimEditor
       AddGenericIcons(_largeImages, _smallImages);
 
       // Right panel list
-      _list = new ListView
+      _list = new ListView      
       {
         Dock = DockStyle.Fill,
         View = View.LargeIcon,
@@ -132,10 +132,9 @@ namespace SwimEditor
         }
       };
 
-      _tool = new ToolStrip
+      _tool = new CrownToolStrip
       {
         GripStyle = ToolStripGripStyle.Hidden,
-        Renderer = new ToolStripProfessionalRenderer(),
         BackColor = SwimEditorTheme.PageBg
       };
 
@@ -162,6 +161,7 @@ namespace SwimEditor
         _list.View = View.LargeIcon;
         UpdateIconSpacingForCentering();
       };
+
       details.Click += (s, e) =>
       {
         large.Checked = false; details.Checked = true;
@@ -180,7 +180,10 @@ namespace SwimEditor
       viewBtn.DropDownItems.Add(large);
       viewBtn.DropDownItems.Add(details);
 
-      _pathBox = new TextBox
+      // TODO: have this as false, so on typing into this if the path is valid to a directory, it goes there.
+      //       On focus leave of typing, if not a valid dir, then just change back to the last valid dir.
+      // Which brings another TODO to note: file search bar, searches starting from active directory and its sub directories.
+      _pathBox = new CrownTextBox
       {
         Dock = DockStyle.Top,
         ReadOnly = true,
@@ -189,8 +192,18 @@ namespace SwimEditor
         ForeColor = SwimEditorTheme.Text
       };
 
+      // --- Right side host with Crown scrollbars around the WinForms ListView ---
+      var vBar = new CrownScrollBar { Dock = DockStyle.Right, Width = 16 };
+
+      var rightContent = new ReaLTaiizor.Controls.Panel { Dock = DockStyle.Fill, BackColor = SwimEditorTheme.PageBg };
+      rightContent.Controls.Add(_list);   // ListView sits "under" the themed bars
+      rightContent.Controls.Add(vBar);
+
+      // Bind Crown scrollbars to ListView
+      ListViewCrownScrollBinder.Attach(_list, vBar);
+
       var rightPanel = new ReaLTaiizor.Controls.Panel { Dock = DockStyle.Fill, BackColor = SwimEditorTheme.PageBg };
-      rightPanel.Controls.Add(_list);
+      rightPanel.Controls.Add(rightContent);
       rightPanel.Controls.Add(_pathBox);
       rightPanel.Controls.Add(_tool);
       _tool.Dock = DockStyle.Top;
@@ -342,7 +355,6 @@ namespace SwimEditor
       HookNode(node);
       return node;
     }
-
 
     private CrownTreeNode MakeFileNode(string path)
     {

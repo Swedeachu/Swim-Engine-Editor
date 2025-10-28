@@ -1,8 +1,5 @@
-﻿using System;
-using System.Drawing;
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 using System.ComponentModel;
-using System.Windows.Forms;
 using ReaLTaiizor.Controls;
 using ReaLTaiizor.Enum.Poison;
 

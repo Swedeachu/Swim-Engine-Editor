@@ -1,6 +1,4 @@
-﻿using System.Drawing;
-
-namespace SwimEditor
+﻿namespace SwimEditor
 {
 
   public static class SwimEditorTheme
