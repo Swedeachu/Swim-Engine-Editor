@@ -10,7 +10,6 @@ namespace SwimEditor
   /// </summary>
   public class UtilityDock : DockContent
   {
-
     private readonly TabControl tabs;
     private readonly ConsoleLogControl log;
     private readonly FileViewControl fileView;
@@ -18,6 +17,7 @@ namespace SwimEditor
     public UtilityDock()
     {
       BackColor = SwimEditorTheme.Bg;
+      Padding = new Padding(0); // avoid any host edge seam
 
       tabs = new DarkTabControl
       {
@@ -31,30 +31,6 @@ namespace SwimEditor
         Margin = Padding.Empty
       };
 
-      // reduce flicker on owner-draw
-      tabs.GetType().GetProperty("DoubleBuffered",
-          System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
-          ?.SetValue(tabs, true, null);
-
-      tabs.DrawItem += (s, e) =>
-      {
-        var selected = (e.State & DrawItemState.Selected) == DrawItemState.Selected;
-        var tabRect = e.Bounds;
-        tabRect.Inflate(-2, -2);
-
-        using (var back = new SolidBrush(selected ? SwimEditorTheme.Bg : SwimEditorTheme.PageBg))
-        using (var border = new Pen(SwimEditorTheme.Line))
-        {
-          e.Graphics.FillRectangle(back, tabRect);
-          e.Graphics.DrawRectangle(border, tabRect);
-          var tabText = tabs.TabPages[e.Index].Text;
-          TextRenderer.DrawText(
-            e.Graphics, tabText, tabs.Font, tabRect, SwimEditorTheme.Text,
-            TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.EndEllipsis
-          );
-        }
-      };
-
       // Debug Log
       log = new ConsoleLogControl();
       var logTab = new TabPage("Debug Log")
@@ -62,10 +38,10 @@ namespace SwimEditor
         BackColor = SwimEditorTheme.PageBg,
         ForeColor = SwimEditorTheme.Text,
         UseVisualStyleBackColor = false,
-        Padding = new Padding(0) 
+        Padding = new Padding(0)
       };
 
-      log.Dock = DockStyle.Fill;   
+      log.Dock = DockStyle.Fill;
       logTab.Controls.Add(log);
       tabs.TabPages.Add(logTab);
 
@@ -75,7 +51,7 @@ namespace SwimEditor
       {
         BackColor = SwimEditorTheme.PageBg,
         ForeColor = SwimEditorTheme.Text,
-        UseVisualStyleBackColor = false,     
+        UseVisualStyleBackColor = false,
         Padding = new Padding(0)
       };
 
@@ -86,7 +62,6 @@ namespace SwimEditor
       Controls.Add(tabs);
     }
 
-    // Public API surface
     public void AppendLog(string text) => log.AppendLine(text);
     public void ClearLog() => log.Clear();
 
