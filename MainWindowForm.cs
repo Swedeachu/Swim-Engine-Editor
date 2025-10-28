@@ -3,6 +3,7 @@ using System.Drawing;
 using System.IO;
 using System.Windows.Forms;
 using WeifenLuo.WinFormsUI.Docking;
+using ReaLTaiizor.Controls;
 
 namespace SwimEditor
 {
@@ -11,11 +12,10 @@ namespace SwimEditor
   {
 
     private DockPanel dockPanel;
-    private VisualStudioToolStripExtender vsExtender;
     private ThemeBase theme;
 
-    private MenuStrip mainMenu;
-    private ToolStrip mainToolbar;
+    private CrownMenuStrip mainMenu;
+    private CrownToolStrip mainToolbar;
 
     private HierarchyDock hierarchy;
     private InspectorDock inspector;
@@ -27,13 +27,7 @@ namespace SwimEditor
     public MainWindowForm()
     {
       InitializeComponent();
-
-      this.BackColor = SwimEditorTheme.PageBg;
-
       InitializeDockingUi();
-
-      dockPanel.BackColor = SwimEditorTheme.Bg;
-
       CreateAndShowPanes();
     }
 
@@ -43,22 +37,36 @@ namespace SwimEditor
       WindowState = FormWindowState.Maximized;
       IsMdiContainer = true;
 
-      theme = new VS2015DarkTheme(); // from WeifenLuo.WinFormsUI.Docking.Themes.VS2015
-
-      // Create strips first so DockPanel.Fill will layout beneath them
-      mainMenu = new MenuStrip();
-      var fileMenu = new ToolStripMenuItem("File");
-      fileMenu.DropDownItems.Add("New");
-      fileMenu.DropDownItems.Add("Open...");
-      fileMenu.DropDownItems.Add("Save");
-      fileMenu.DropDownItems.Add(new ToolStripSeparator());
-      fileMenu.DropDownItems.Add("Exit");
-      mainMenu.Items.Add(fileMenu);
+      theme = new VS2015DarkTheme(); 
 
       // TODO centered and with icons like green flag, red square, etc, and a pause button somehow
-      mainToolbar = new ToolStrip();
-      var playButton = new ToolStripButton("Play") { DisplayStyle = ToolStripItemDisplayStyle.Text };
-      var stopButton = new ToolStripButton("Stop") { DisplayStyle = ToolStripItemDisplayStyle.Text };
+      mainToolbar = new CrownToolStrip
+      {
+        Dock = DockStyle.Top,
+        GripStyle = ToolStripGripStyle.Hidden,
+        BackColor = SwimEditorTheme.Bg,
+        ForeColor = SwimEditorTheme.Text,
+        Padding = new Padding(6, 2, 6, 2)
+      };
+
+      var playButton = new ToolStripButton("Play")
+      {
+        DisplayStyle = ToolStripItemDisplayStyle.Text,
+        ForeColor = SwimEditorTheme.Text
+      };
+
+      var stopButton = new ToolStripButton("Stop")
+      {
+        DisplayStyle = ToolStripItemDisplayStyle.Text,
+        ForeColor = SwimEditorTheme.Text
+      };
+
+      // Optional simple accent cues on hover/click (Crown respects ToolStrip rendermode/colors)
+      playButton.MouseEnter += (s, e) => playButton.ForeColor = SwimEditorTheme.Accent;
+      playButton.MouseLeave += (s, e) => playButton.ForeColor = SwimEditorTheme.Text;
+      stopButton.MouseEnter += (s, e) => stopButton.ForeColor = SwimEditorTheme.Accent;
+      stopButton.MouseLeave += (s, e) => stopButton.ForeColor = SwimEditorTheme.Text;
+
       mainToolbar.Items.Add(playButton);
       mainToolbar.Items.Add(stopButton);
 
@@ -67,25 +75,20 @@ namespace SwimEditor
       {
         Dock = DockStyle.Fill,
         Theme = theme,
-        DocumentStyle = DocumentStyle.DockingMdi
+        DocumentStyle = DocumentStyle.DockingMdi,
+        BackColor = SwimEditorTheme.Bg
       };
-
-      // Theme the strips 
-      vsExtender = new VisualStudioToolStripExtender();
-      vsExtender.SetStyle(mainMenu, VisualStudioToolStripExtender.VsVersion.Vs2015, theme);
-      vsExtender.SetStyle(mainToolbar, VisualStudioToolStripExtender.VsVersion.Vs2015, theme);
 
       // Add controls in this order so menu/toolstrip sit at top, dock fills the rest
       Controls.Add(dockPanel);
       Controls.Add(mainToolbar);
-      Controls.Add(mainMenu);
 
       MainMenuStrip = mainMenu;
 
       // Layout persistence path
       string appData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-      layoutPath = System.IO.Path.Combine(appData, "SwimEditor", "layout.xml");
-      System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(layoutPath));
+      layoutPath = Path.Combine(appData, "SwimEditor", "layout.xml");
+      Directory.CreateDirectory(Path.GetDirectoryName(layoutPath));
     }
 
     // TODO: serialize each panels width and height on last program close and their position and dock state

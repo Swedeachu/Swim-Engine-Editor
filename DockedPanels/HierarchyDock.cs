@@ -1,7 +1,8 @@
 ﻿using System;
-using System.Drawing;
+using System.Linq;
 using System.Windows.Forms;
 using WeifenLuo.WinFormsUI.Docking;
+using ReaLTaiizor.Controls;
 
 namespace SwimEditor
 {
@@ -9,25 +10,26 @@ namespace SwimEditor
   public class HierarchyDock : DockContent
   {
 
-    private DarkTreeView treeView;
+    private CrownTreeView treeView;
 
     public event Action<object> OnSelectionChanged;
 
     public HierarchyDock()
     {
-      // Dark theme needs explicit colors
-      treeView = new DarkTreeView
+      // Dark theme with CrownTreeView (ReaLTaiizor) replacing DarkTreeView
+      treeView = new CrownTreeView
       {
-        Dock = DockStyle.Fill,
-        HideSelection = false,
-        BorderStyle = BorderStyle.None,
-        BackColor = SwimEditorTheme.PageBg,
-        ForeColor = Color.Gainsboro
+        Dock = DockStyle.Fill
       };
 
-      treeView.AfterSelect += (s, e) =>
+      // Selection change uses SelectedNodesChanged, not AfterSelect
+      treeView.SelectedNodesChanged += (s, e) =>
       {
-        OnSelectionChanged?.Invoke(e.Node);
+        var node = treeView.SelectedNodes.LastOrDefault();
+        if (node != null)
+        {
+          OnSelectionChanged?.Invoke(node);
+        }
       };
 
       Controls.Add(treeView);
@@ -37,11 +39,13 @@ namespace SwimEditor
 
       // Expand the root for immediate visual verification
       if (treeView.Nodes.Count > 0)
-        treeView.Nodes[0].Expand();
+      {
+        treeView.Nodes[0].Expanded = true;
+      }
     }
 
     /// <summary>
-    /// Creates a big fake hierarchy to test DarkTreeView scrolling and layout.
+    /// Creates a big fake hierarchy to test CrownTreeView scrolling and layout.
     /// - Many root-level and nested objects
     /// - Variable component counts
     /// - Some long names to exercise horizontal scrolling
@@ -86,104 +90,109 @@ namespace SwimEditor
         "Volumetric", "Holographic", "Spline", "Bezier", "Anisotropic", "Temporal"
       };
 
-      treeView.BeginUpdate();
-      try
+      treeView.Nodes.Clear();
+
+      var root = new CrownTreeNode("Scene (Test World)");
+      treeView.Nodes.Add(root);
+
+      // Add a few fixed systems up top
+      var systems = new CrownTreeNode("Systems");
+      systems.Nodes.Add(new CrownTreeNode("RenderSystem"));
+      systems.Nodes.Add(new CrownTreeNode("PhysicsSystem"));
+      systems.Nodes.Add(new CrownTreeNode("AudioSystem"));
+      systems.Nodes.Add(new CrownTreeNode("UISystem"));
+      root.Nodes.Add(systems);
+
+      // Cameras / lights
+      var cameras = new CrownTreeNode("Cameras");
+      cameras.Nodes.Add(new CrownTreeNode("Main Camera"));
+      cameras.Nodes.Add(new CrownTreeNode("UI Camera"));
+      root.Nodes.Add(cameras);
+
+      var lights = new CrownTreeNode("Lights");
+      lights.Nodes.Add(new CrownTreeNode("Directional Light"));
+      lights.Nodes.Add(new CrownTreeNode("Fill Light"));
+      lights.Nodes.Add(new CrownTreeNode("Rim Light"));
+      root.Nodes.Add(lights);
+
+      // Massive batch of objects
+      var objectsRoot = new CrownTreeNode("GameObjects");
+      root.Nodes.Add(objectsRoot);
+
+      for (int i = 0; i < objectCount; i++)
       {
-        treeView.Nodes.Clear();
+        // Mix in some long/varied names to force horizontal scroll when needed
+        string longBit = (i % 9 == 0)
+          ? $"_{longNameTokens[rnd.Next(longNameTokens.Length)]}_{longNameTokens[rnd.Next(longNameTokens.Length)]}_ID{i:0000}"
+          : $"_{i:0000}";
 
-        var root = treeView.Nodes.Add("Scene (Test World)");
-        // Add a few fixed systems up top
-        var systems = root.Nodes.Add("Systems");
-        systems.Nodes.Add("RenderSystem");
-        systems.Nodes.Add("PhysicsSystem");
-        systems.Nodes.Add("AudioSystem");
-        systems.Nodes.Add("UISystem");
+        var go = new CrownTreeNode("GameObject" + longBit);
+        objectsRoot.Nodes.Add(go);
 
-        // Cameras / lights
-        var cameras = root.Nodes.Add("Cameras");
-        cameras.Nodes.Add("Main Camera");
-        cameras.Nodes.Add("UI Camera");
+        // Always include Transform
+        go.Nodes.Add(new CrownTreeNode("Transform"));
 
-        var lights = root.Nodes.Add("Lights");
-        lights.Nodes.Add("Directional Light");
-        lights.Nodes.Add("Fill Light");
-        lights.Nodes.Add("Rim Light");
-
-        // Massive batch of objects
-        var objectsRoot = root.Nodes.Add("GameObjects");
-
-        for (int i = 0; i < objectCount; i++)
+        // Random number of other components
+        int compCount = 1 + rnd.Next(Math.Max(1, maxComponentsPerObject));
+        for (int c = 0; c < compCount; c++)
         {
-          // Mix in some long/varied names to force horizontal scroll when needed
-          string longBit = (i % 9 == 0)
-            ? $"_{longNameTokens[rnd.Next(longNameTokens.Length)]}_{longNameTokens[rnd.Next(longNameTokens.Length)]}_ID{i:0000}"
-            : $"_{i:0000}";
+          string comp = componentPool[rnd.Next(componentPool.Length)];
 
-          var go = objectsRoot.Nodes.Add("GameObject" + longBit);
-
-          // Always include Transform
-          go.Nodes.Add("Transform");
-
-          // Random number of other components
-          int compCount = 1 + rnd.Next(Math.Max(1, maxComponentsPerObject));
-          for (int c = 0; c < compCount; c++)
+          // Occasionally create very long component names to test h-scroll
+          if (rnd.NextDouble() < 0.08)
           {
-            string comp = componentPool[rnd.Next(componentPool.Length)];
-
-            // Occasionally create very long component names to test h-scroll
-            if (rnd.NextDouble() < 0.08)
-            {
-              comp += $" [LOD={rnd.Next(0, 4)}] (Layer={rnd.Next(0, 32)}) <Tag=Test_{i % 7}>";
-            }
-
-            go.Nodes.Add(comp);
+            comp += $" [LOD={rnd.Next(0, 4)}] (Layer={rnd.Next(0, 32)}) <Tag=Test_{i % 7}>";
           }
 
-          // Some nested children to test deeper trees
-          if (i % 7 == 0)
-          {
-            var childA = go.Nodes.Add("Child_A" + (i % 100));
-            childA.Nodes.Add("Transform");
-            childA.Nodes.Add("MeshRenderer");
-            childA.Nodes.Add("BoxCollider");
-
-            if (i % 14 == 0)
-            {
-              var grand = childA.Nodes.Add("GrandChild_X" + (i % 37));
-              grand.Nodes.Add("Transform");
-              grand.Nodes.Add("ParticleSystem");
-
-              if (i % 28 == 0)
-              {
-                var gg = grand.Nodes.Add("GreatGrandChild_" + (i % 11));
-                gg.Nodes.Add("Transform");
-                gg.Nodes.Add("Script<AIController>");
-              }
-            }
-
-            var childB = go.Nodes.Add("Child_B" + (i % 33));
-            childB.Nodes.Add("Transform");
-            childB.Nodes.Add("RectTransform");
-            childB.Nodes.Add("Image");
-            childB.Nodes.Add("Button");
-          }
-
-          // Expand a subset for visual diversity
-          if (i < 5 || (i % 25 == 0))
-            go.Expand();
+          go.Nodes.Add(new CrownTreeNode(comp));
         }
 
-        // Expand upper groups for immediate content without fully opening everything
-        root.Expand();
-        systems.Expand();
-        cameras.Expand();
-        lights.Expand();
-        objectsRoot.Expand();
+        // Some nested children to test deeper trees
+        if (i % 7 == 0)
+        {
+          var childA = new CrownTreeNode("Child_A" + (i % 100));
+          childA.Nodes.Add(new CrownTreeNode("Transform"));
+          childA.Nodes.Add(new CrownTreeNode("MeshRenderer"));
+          childA.Nodes.Add(new CrownTreeNode("BoxCollider"));
+
+          if (i % 14 == 0)
+          {
+            var grand = new CrownTreeNode("GrandChild_X" + (i % 37));
+            grand.Nodes.Add(new CrownTreeNode("Transform"));
+            grand.Nodes.Add(new CrownTreeNode("ParticleSystem"));
+
+            if (i % 28 == 0)
+            {
+              var gg = new CrownTreeNode("GreatGrandChild_" + (i % 11));
+              gg.Nodes.Add(new CrownTreeNode("Transform"));
+              gg.Nodes.Add(new CrownTreeNode("Script<AIController>"));
+              grand.Nodes.Add(gg);
+            }
+
+            childA.Nodes.Add(grand);
+          }
+
+          var childB = new CrownTreeNode("Child_B" + (i % 33));
+          childB.Nodes.Add(new CrownTreeNode("Transform"));
+          childB.Nodes.Add(new CrownTreeNode("RectTransform"));
+          childB.Nodes.Add(new CrownTreeNode("Image"));
+          childB.Nodes.Add(new CrownTreeNode("Button"));
+
+          go.Nodes.Add(childA);
+          go.Nodes.Add(childB);
+        }
+
+        // Expand a subset for visual diversity
+        if (i < 5 || (i % 25 == 0))
+          go.Expanded = true;
       }
-      finally
-      {
-        treeView.EndUpdate();
-      }
+
+      // Expand upper groups for immediate content without fully opening everything
+      root.Expanded = true;
+      systems.Expanded = true;
+      cameras.Expanded = true;
+      lights.Expanded = true;
+      objectsRoot.Expanded = true;
     }
 
   } // class HierarchyDock

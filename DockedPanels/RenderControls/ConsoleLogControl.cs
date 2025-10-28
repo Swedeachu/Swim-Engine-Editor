@@ -1,29 +1,28 @@
 ﻿using System;
 using System.Drawing;
 using System.Runtime.InteropServices;
+using System.ComponentModel;
 using System.Windows.Forms;
+using ReaLTaiizor.Controls;
+using ReaLTaiizor.Enum.Poison;
 
 namespace SwimEditor
 {
 
   /// <summary>
-  /// Console-like log with a dark, owner-painted scrollbar (no white OS track).
-  /// Top panel shows the log, bottom panel is a simple input bar.
-  /// - Hides native caret in the log
-  /// - Syncs a custom scrollbar to the RichTextBox
-  /// - Auto-hides the scrollbar when content fits
-  /// - Only autoscrolls when the user is already at bottom
-  /// - Bounded line count to keep perf snappy for long sessions
-  /// - Optional command history (Up/Down)
+  /// Console-like log using ReaLTaiizor PoisonTextBox (flat, no white outline) + CrownScrollBar.
+  /// - Custom dark scrollbar (CrownScrollBar) stays in sync with the log
+  /// - Mouse wheel over the text scrolls (we drive EM_LINESCROLL), bar syncs
+  /// - Autoscroll only if already at bottom
+  /// - Bounded line count (trimming)
+  /// - Command history (Up/Down)
+  /// - Hides caret in the log
   /// </summary>
   public class ConsoleLogControl : UserControl
   {
 
-    [DllImport("user32.dll")]
-    private static extern bool HideCaret(IntPtr hWnd);
-
-    [DllImport("user32.dll")]
-    private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll")] private static extern bool HideCaret(IntPtr hWnd);
+    [DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
 
     private const int EM_GETFIRSTVISIBLELINE = 0x00CE;
     private const int EM_GETLINECOUNT = 0x00BA;
@@ -31,10 +30,14 @@ namespace SwimEditor
     private const int WM_SETREDRAW = 0x000B;
 
     private readonly SplitContainer layout;
-    private readonly Panel logHost;
-    private readonly RichTextBox log;
-    private readonly DarkScrollBar vbar;
-    private readonly TextBox input;
+
+    private readonly System.Windows.Forms.Panel logHost;     // log + custom scrollbar
+    private readonly CrownScrollBar vbar;                    // custom dark scrollbar
+    private readonly FlatPoisonTextBox log;                  // multiline, flat (no border draw)
+    private readonly FlatPoisonTextBox input;                // single-line, flat
+
+    private readonly System.Windows.Forms.Panel inputBar;    // holds separator + prompt + textbox
+    private readonly System.Windows.Forms.Panel inputSep;    // 1px divider
 
     private readonly System.Collections.Generic.List<string> history = new System.Collections.Generic.List<string>();
     private int historyIndex = -1;
@@ -47,129 +50,268 @@ namespace SwimEditor
     {
       BackColor = SwimEditorTheme.PageBg;
 
-      // Layout: top = log host (custom scrollbar), bottom = input
-      layout = new SplitContainer();
-      layout.Dock = DockStyle.Fill;
-      layout.Orientation = Orientation.Horizontal;
-      layout.FixedPanel = FixedPanel.Panel2;
-      layout.IsSplitterFixed = true;
-      layout.SplitterWidth = 1;
-      layout.Panel2MinSize = 20;
-      layout.Height = Height;
+      // Layout: top = log host (log + custom vbar), bottom = input
+      layout = new SplitContainer
+      {
+        Dock = DockStyle.Fill,
+        Orientation = Orientation.Horizontal,
+        FixedPanel = FixedPanel.Panel2,
+        IsSplitterFixed = true,
+        SplitterWidth = 1,
+        Panel2MinSize = 20,
+        Height = Height
+      };
 
-      // Host for log + custom scrollbar (we pad on the right by scrollbar width)
-      logHost = new Panel();
-      logHost.Dock = DockStyle.Fill;
-      logHost.Margin = Padding.Empty;
-      logHost.Padding = Padding.Empty;
-      logHost.BackColor = SwimEditorTheme.PageBg;
+      // Host panel for log + custom scrollbar; rely on pure docking (no manual padding)
+      logHost = new System.Windows.Forms.Panel
+      {
+        Dock = DockStyle.Fill,
+        Margin = Padding.Empty,
+        Padding = Padding.Empty,
+        BackColor = SwimEditorTheme.PageBg
+      };
 
-      // Log (read-only, selectable, caret hidden)
-      log = new RichTextBox();
-      log.Dock = DockStyle.Fill;
-      log.ReadOnly = true;
-      log.BorderStyle = BorderStyle.None;
-      log.BackColor = SwimEditorTheme.PageBg;
-      log.ForeColor = SwimEditorTheme.Text;
-      log.ScrollBars = RichTextBoxScrollBars.None; // hide native (white) scrollbar
-      log.WordWrap = false;
-      log.TabStop = false;
-      log.Cursor = Cursors.Arrow;
+      // Multiline flat PoisonTextBox (no white outline), no native scrollbars
+      log = new FlatPoisonTextBox
+      {
+        Dock = DockStyle.Fill,
+        Theme = ThemeStyle.Dark,
+        Style = ColorStyle.Blue,
 
-      // Custom dark scrollbar
-      vbar = new DarkScrollBar();
-      vbar.Width = 12;
-      vbar.Dock = DockStyle.Right;
-      vbar.Margin = Padding.Empty;
-      vbar.SetScrollHooks(log, logHost, SyncBarFromControl);
-      vbar.HookAutoHideLayout(logHost);
+        UseCustomBackColor = true,
+        UseCustomForeColor = true,
+        BackColor = SwimEditorTheme.PageBg,
+        ForeColor = SwimEditorTheme.Text,
 
-      logHost.Padding = new Padding(0, 0, vbar.Width, 0);
+        Multiline = true,
+        ReadOnly = true,
+        ShortcutsEnabled = true,
+        ScrollBars = ScrollBars.None,   // hide native bar; use CrownScrollBar
+        TabStop = false,
+        ShowButton = false,
+        ShowClearButton = false
+      };
 
-      // Sync RichTextBox <-> custom scrollbar
-      log.VScroll += delegate { SyncBarFromControl(); };
-      log.TextChanged += delegate { SyncBarFromControl(); };
-      log.Resize += delegate { SyncBarFromControl(); };
-      vbar.ScrollValueChanged += delegate (int newValue) { ScrollLogTo(newValue); };
+      // Configure inner TextBox (wheel, caret hiding, no word-wrap, colors)
+      log.HandleCreated += (s, e) =>
+      {
+        var inner = GetInnerTextBox(log);
+        if (inner != null)
+        {
+          inner.WordWrap = false;
+          inner.Cursor = Cursors.Arrow;
 
-      // Hide caret on focus interactions
-      log.GotFocus += delegate { if (!log.IsHandleCreated) return; HideCaret(log.Handle); };
-      log.Enter += delegate { if (!log.IsHandleCreated) return; HideCaret(log.Handle); };
-      log.MouseDown += delegate { if (!log.IsHandleCreated) return; HideCaret(log.Handle); };
-      log.MouseUp += delegate { if (!log.IsHandleCreated) return; HideCaret(log.Handle); };
-      log.SelectionChanged += delegate { if (!log.IsHandleCreated) return; HideCaret(log.Handle); };
-      log.MouseWheel += delegate { SyncBarFromControl(); };
+          inner.BackColor = SwimEditorTheme.PageBg;
+          inner.ForeColor = SwimEditorTheme.Text;
 
-      logHost.Controls.Add(log);
+          void hide() { if (inner.IsHandleCreated) HideCaret(inner.Handle); }
+          inner.GotFocus += (s2, e2) => hide();
+          inner.Enter += (s2, e2) => hide();
+          inner.MouseDown += (s2, e2) => hide();
+          inner.MouseUp += (s2, e2) => hide();
+          inner.KeyUp += (s2, e2) => hide();
+
+          // manual wheel => LINESCROLL (so scrolling works even without native bar)
+          inner.MouseWheel += (s2, e2) =>
+          {
+            int linesPerNotch = Math.Max(1, SystemInformation.MouseWheelScrollLines);
+            int notches = e2.Delta / 120;
+            int scrollLines = -notches * linesPerNotch;
+            if (scrollLines != 0)
+            {
+              SendMessage(inner.Handle, EM_LINESCROLL, IntPtr.Zero, (IntPtr)scrollLines);
+              hide();
+              SyncBarFromInner();
+            }
+          };
+
+          // sync on content/size changes
+          inner.TextChanged += (s2, e2) => SyncBarFromInner();
+          inner.Resize += (s2, e2) => SyncBarFromInner();
+        }
+
+        // First sync once created
+        SyncBarFromInner();
+      };
+
+      // Keep layout perfect when entering/leaving (e.g., tabbing back in)
+      log.Enter += (s, e) => SyncBarFromInner();
+      log.Leave += (s, e) => SyncBarFromInner();
+
+      // Optional: on hover, focus inner so wheel works instantly
+      log.MouseEnter += (s, e) =>
+      {
+        var inner = GetInnerTextBox(log);
+        if (inner != null) inner.Focus();
+      };
+
+      // Custom dark scrollbar (Crown) — docked to RIGHT, no manual padding
+      vbar = new CrownScrollBar
+      {
+        Dock = DockStyle.Right,
+        Width = 16,                   // align with ThemeProvider sizes (>= ScrollBarSize)
+        Margin = Padding.Empty
+      };
+      vbar.ScrollOrientation = ReaLTaiizor.Enum.Crown.ScrollOrientation.Vertical;
+      vbar.ValueChanged += (s, e) => ScrollLogTo(e.Value);
+
+      // Add in dock-order: add vbar first, then log (so log fills remaining space cleanly)
       logHost.Controls.Add(vbar);
+      logHost.Controls.Add(log);
+
       layout.Panel1.Controls.Add(logHost);
 
-      // Input (single-line, caret visible)
-      input = new TextBox();
-      input.BorderStyle = BorderStyle.FixedSingle;
-      input.BackColor = SwimEditorTheme.PageBg;
-      input.ForeColor = SwimEditorTheme.Text;
-      input.AutoSize = false;
-      input.Margin = new Padding(0);
-      input.Height = input.PreferredHeight;
+      // INPUT (single-line, flat)
+      input = new FlatPoisonTextBox
+      {
+        Theme = ThemeStyle.Dark,
+        Style = ColorStyle.Blue,
 
-      // Input bar (prompt + textbox)
-      var inputBar = new Panel();
-      inputBar.Dock = DockStyle.Fill;
-      inputBar.Margin = new Padding(0);
-      inputBar.Padding = new Padding(0);
-      inputBar.BackColor = SwimEditorTheme.PageBg;
+        UseCustomBackColor = true,
+        UseCustomForeColor = true,
+        BackColor = SwimEditorTheme.PageBg,
+        ForeColor = SwimEditorTheme.Text,
 
-      var prompt = new Label();
-      prompt.Text = ">";
-      prompt.AutoSize = false;
-      prompt.Margin = new Padding(0);
-      prompt.Padding = new Padding(0);
-      prompt.ForeColor = SwimEditorTheme.Text;
-      prompt.TextAlign = ContentAlignment.MiddleLeft;
+        Multiline = false,
+        ShortcutsEnabled = true,
+        ShowButton = false,
+        ShowClearButton = false,
+        Margin = new Padding(0)
+      };
+
+      input.HandleCreated += (s, e) =>
+      {
+        var inner = GetInnerTextBox(input);
+        if (inner != null)
+        {
+          inner.BackColor = SwimEditorTheme.PageBg;
+          inner.ForeColor = SwimEditorTheme.Text;
+        }
+      };
+
+      inputBar = new System.Windows.Forms.Panel
+      {
+        Dock = DockStyle.Fill,
+        Margin = new Padding(0),
+        Padding = new Padding(0),
+        BackColor = SwimEditorTheme.PageBg
+      };
+
+      inputSep = new System.Windows.Forms.Panel
+      {
+        Dock = DockStyle.Top,
+        Height = 1,
+        BackColor = SwimEditorTheme.Line
+      };
+
+      var prompt = new System.Windows.Forms.Label
+      {
+        Text = ">",
+        AutoSize = false,
+        Margin = new Padding(0),
+        Padding = new Padding(0),
+        ForeColor = SwimEditorTheme.Text,
+        TextAlign = ContentAlignment.MiddleLeft,
+        BackColor = SwimEditorTheme.PageBg
+      };
 
       inputBar.Controls.Add(prompt);
       inputBar.Controls.Add(input);
+      inputBar.Controls.Add(inputSep);
 
-      // Local layout for pixel-perfect alignment
+      // Pixel-perfect layout for input row
       void LayoutInputBar()
       {
-        int h = input.PreferredHeight;
+        var inner = GetInnerTextBox(input);
+        int h = (inner != null) ? inner.PreferredHeight + 6 : input.PreferredSize.Height;
         int leftPad = 4;
         int gap = 6;
-        prompt.SetBounds(leftPad, 0, TextRenderer.MeasureText(prompt.Text, prompt.Font).Width, h);
+        int y = inputSep.Bottom;
+
+        prompt.SetBounds(leftPad, y, TextRenderer.MeasureText(prompt.Text, prompt.Font).Width, h);
         int x = prompt.Right + gap;
         int w = Math.Max(10, inputBar.ClientSize.Width - x - 4);
-        input.SetBounds(x, 0, w, h);
-        layout.Panel2MinSize = h;
+        input.SetBounds(x, y, w, h);
+
+        layout.Panel2MinSize = h + inputSep.Height;
       }
 
       inputBar.Resize += (s, e) => LayoutInputBar();
-      LayoutInputBar();
+      input.HandleCreated += (s, e) => LayoutInputBar();
 
       layout.Panel2.Controls.Add(inputBar);
       Controls.Add(layout);
 
-      // Wire input keys (Enter submission, Up/Down history, Ctrl+L clear)
-      input.KeyDown += Input_KeyDown;
+      // Input behavior
+      input.KeyDown += InputKeyDown;
 
-      SyncBarFromControl();
+      // keep bar synced on control-level size changes too
+      Resize += (s, e) => SyncBarFromInner();
+      VisibleChanged += (s, e) => SyncBarFromInner();
     }
 
-    private void Input_KeyDown(object sender, KeyEventArgs e)
+    // Access the inner TextBox Poison hosts
+    private static TextBox GetInnerTextBox(PoisonTextBox host)
+    {
+      return (host != null && host.Controls.Count > 0) ? host.Controls[0] as TextBox : null;
+    }
+
+    // Sync custom scrollbar from the inner TextBox state
+    private void SyncBarFromInner()
+    {
+      var inner = GetInnerTextBox(log);
+      if (inner == null || !inner.IsHandleCreated) return;
+
+      int totalLines = Math.Max(1, (int)SendMessage(inner.Handle, EM_GETLINECOUNT, IntPtr.Zero, IntPtr.Zero));
+      int first = (int)SendMessage(inner.Handle, EM_GETFIRSTVISIBLELINE, IntPtr.Zero, IntPtr.Zero);
+
+      int bottomChar = inner.GetCharIndexFromPosition(new Point(1, Math.Max(1, inner.ClientSize.Height - 1)));
+      int bottomLine = inner.GetLineFromCharIndex(bottomChar);
+      int visible = Math.Max(1, bottomLine - first + 1);
+
+      vbar.Minimum = 0;
+      vbar.Maximum = totalLines;
+      vbar.ViewSize = visible;
+
+      int maxFirst = Math.Max(0, vbar.Maximum - vbar.ViewSize);
+      int clampedFirst = Math.Max(0, Math.Min(first, maxFirst));
+      if (vbar.Value != clampedFirst)
+        vbar.Value = clampedFirst;
+
+      // Only toggle visibility; docking handles layout (no manual padding)
+      vbar.Visible = vbar.Maximum > vbar.ViewSize;
+    }
+
+    // Scroll inner TextBox to a target first visible line (diff with current)
+    private void ScrollLogTo(int targetFirstVisibleLine)
+    {
+      var inner = GetInnerTextBox(log);
+      if (inner == null || !inner.IsHandleCreated) return;
+
+      int currentFirst = (int)SendMessage(inner.Handle, EM_GETFIRSTVISIBLELINE, IntPtr.Zero, IntPtr.Zero);
+      int delta = targetFirstVisibleLine - currentFirst;
+      if (delta != 0)
+      {
+        SendMessage(inner.Handle, EM_LINESCROLL, IntPtr.Zero, (IntPtr)delta);
+        HideCaret(inner.Handle);
+      }
+    }
+
+    private void InputKeyDown(object sender, KeyEventArgs e)
     {
       if (e.KeyCode == Keys.Enter)
       {
         e.SuppressKeyPress = true;
+
         string command = input.Text;
         if (!string.IsNullOrWhiteSpace(command))
         {
           AppendLine("> " + command);
           history.Add(command);
           historyIndex = history.Count;
-          if (CommandEntered != null) CommandEntered(command);
+          CommandEntered?.Invoke(command);
           input.Clear();
-          ParseEngineCommand(command); // internal 
+          ParseEngineCommand(command);
         }
       }
       else if (e.KeyCode == Keys.Up)
@@ -178,7 +320,12 @@ namespace SwimEditor
         {
           historyIndex = Math.Max(0, historyIndex - 1);
           input.Text = history[historyIndex];
-          input.SelectionStart = input.TextLength;
+          var inner = GetInnerTextBox(input);
+          if (inner != null)
+          {
+            inner.SelectionStart = inner.TextLength;
+            inner.SelectionLength = 0;
+          }
         }
         e.SuppressKeyPress = true;
       }
@@ -188,7 +335,12 @@ namespace SwimEditor
         {
           historyIndex = Math.Min(history.Count, historyIndex + 1);
           input.Text = (historyIndex >= history.Count) ? "" : history[historyIndex];
-          input.SelectionStart = input.TextLength;
+          var inner = GetInnerTextBox(input);
+          if (inner != null)
+          {
+            inner.SelectionStart = inner.TextLength;
+            inner.SelectionLength = 0;
+          }
         }
         e.SuppressKeyPress = true;
       }
@@ -210,184 +362,183 @@ namespace SwimEditor
       }
     }
 
-    private void SyncBarFromControl()
-    {
-      if (!log.IsHandleCreated) return;
-
-      int totalLines = Math.Max(1, (int)SendMessage(log.Handle, EM_GETLINECOUNT, IntPtr.Zero, IntPtr.Zero));
-      int first = (int)SendMessage(log.Handle, EM_GETFIRSTVISIBLELINE, IntPtr.Zero, IntPtr.Zero);
-      int bottomChar = log.GetCharIndexFromPosition(new Point(1, Math.Max(1, log.ClientSize.Height - 1)));
-      int bottomLine = log.GetLineFromCharIndex(bottomChar);
-      int visible = Math.Max(1, bottomLine - first + 1);
-
-      vbar.SetRange(0, Math.Max(0, totalLines - 1), visible, 1);
-      int clamped = Math.Max(0, Math.Min(first, vbar.Maximum - vbar.LargeChange + 1));
-      vbar.Value = clamped;
-    }
-
-    private void ScrollLogTo(int targetFirstVisibleLine)
-    {
-      if (!log.IsHandleCreated) return;
-
-      int currentFirst = (int)SendMessage(log.Handle, EM_GETFIRSTVISIBLELINE, IntPtr.Zero, IntPtr.Zero);
-      int delta = targetFirstVisibleLine - currentFirst;
-      if (delta != 0)
-      {
-        SendMessage(log.Handle, EM_LINESCROLL, IntPtr.Zero, (IntPtr)delta);
-        HideCaret(log.Handle);
-      }
-    }
-
     /// <summary>
-    /// When appending, we only autoscroll if the user is already at the bottom.
+    /// Append a line. If already at bottom, keep autoscrolling; otherwise preserve scroll.
     /// Also trims old lines if the maximum line count is exceeded.
     /// </summary>
     public void AppendLine(string text)
     {
-      if (log.IsDisposed) return;
-      if (!IsHandleCreated || !log.IsHandleCreated)
+      if (IsDisposed) return;
+
+      var inner = GetInnerTextBox(log);
+      if (inner == null)
       {
-        // control not ready yet; append bare
-        if (log.TextLength > 0) log.AppendText(Environment.NewLine);
+        if (log.Text.Length > 0) log.AppendText(Environment.NewLine);
         log.AppendText(text);
         return;
       }
 
-      if (log.InvokeRequired)
-      {
-        log.BeginInvoke(new Action<string>(AppendLine), text);
-        return;
-      }
+      if (InvokeRequired) { BeginInvoke(new Action<string>(AppendLine), text); return; }
 
-      bool isAtBottom = IsAtBottom();
+      bool isAtBottom = IsAtBottom(inner);
 
-      BeginUpdate();
+      BeginUpdate(inner);
       try
       {
-        if (log.TextLength > 0) log.AppendText(Environment.NewLine);
+        if (log.Text.Length > 0) log.AppendText(Environment.NewLine);
         log.AppendText(text);
 
-        TrimLogIfNeeded();
+        TrimLogIfNeeded(inner);
 
         if (isAtBottom)
         {
-          log.SelectionStart = log.TextLength;
-          log.SelectionLength = 0;
-          log.ScrollToCaret();
+          inner.SelectionStart = inner.TextLength;
+          inner.SelectionLength = 0;
+          SnapToBottom(inner);
         }
       }
       finally
       {
-        EndUpdate();
-        SyncBarFromControl();
-        HideCaret(log.Handle);
+        EndUpdate(inner);
+        HideCaret(inner.Handle);
+        SyncBarFromInner();
       }
     }
 
-    /// <summary>
-    /// Clears the log content.
-    /// </summary>
+    /// <summary>Clears the log content.</summary>
     public void Clear()
     {
-      if (log.IsDisposed) return;
-      if (log.InvokeRequired) { log.BeginInvoke(new Action(Clear)); return; }
+      var inner = GetInnerTextBox(log);
+      if (inner == null) { log.Clear(); return; }
 
-      BeginUpdate();
+      if (InvokeRequired) { BeginInvoke(new Action(Clear)); return; }
+
+      BeginUpdate(inner);
       try
       {
         log.Clear();
       }
       finally
       {
-        EndUpdate();
-        SyncBarFromControl();
+        EndUpdate(inner);
+        SyncBarFromInner();
       }
     }
 
-    /// <summary>
-    /// Focuses the input box, placing caret at end.
-    /// </summary>
+    /// <summary>Focuses the input box, placing caret at end.</summary>
     public void FocusInput()
     {
-      input.Focus();
-      input.Select(input.TextLength, 0);
+      var inner = GetInnerTextBox(input);
+      if (inner != null)
+      {
+        inner.Focus();
+        inner.SelectionStart = inner.TextLength;
+        inner.SelectionLength = 0;
+      }
+      else
+      {
+        input.Focus();
+      }
     }
 
-    /// <summary>
-    /// Maximum number of lines retained in the log (oldest are trimmed).
-    /// </summary>
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public int MaxLines
     {
       get { return _maxLines; }
       set { _maxLines = Math.Max(100, value); }
     }
 
-    /// <summary>
-    /// Returns the entire log text.
-    /// </summary>
-    public string LogText
-    {
-      get { return log.Text; }
-    }
+    public string LogText => log.Text;
 
-    private bool IsAtBottom()
-    {
-      if (!log.IsHandleCreated) return true;
+    // --- utilities ----------------------------------------------------------
 
-      int first = (int)SendMessage(log.Handle, EM_GETFIRSTVISIBLELINE, IntPtr.Zero, IntPtr.Zero);
-      int bottomChar = log.GetCharIndexFromPosition(new Point(1, Math.Max(1, log.ClientSize.Height - 1)));
-      int bottomLine = log.GetLineFromCharIndex(bottomChar);
+    private static bool IsAtBottom(TextBox inner)
+    {
+      if (inner == null || !inner.IsHandleCreated) return true;
+
+      int totalLines = Math.Max(1, (int)SendMessage(inner.Handle, EM_GETLINECOUNT, IntPtr.Zero, IntPtr.Zero));
+      int first = (int)SendMessage(inner.Handle, EM_GETFIRSTVISIBLELINE, IntPtr.Zero, IntPtr.Zero);
+      int bottomChar = inner.GetCharIndexFromPosition(new Point(1, Math.Max(1, inner.ClientSize.Height - 1)));
+      int bottomLine = inner.GetLineFromCharIndex(bottomChar);
       int visible = Math.Max(1, bottomLine - first + 1);
-      int total = Math.Max(1, (int)SendMessage(log.Handle, EM_GETLINECOUNT, IntPtr.Zero, IntPtr.Zero));
-      return (first + visible) >= total;
+
+      return (first + visible) >= totalLines;
     }
 
-    private void TrimLogIfNeeded()
+    private void TrimLogIfNeeded(TextBox inner)
     {
-      int totalLines = (int)SendMessage(log.Handle, EM_GETLINECOUNT, IntPtr.Zero, IntPtr.Zero);
+      if (inner == null || !inner.IsHandleCreated) return;
+
+      int totalLines = (int)SendMessage(inner.Handle, EM_GETLINECOUNT, IntPtr.Zero, IntPtr.Zero);
       if (totalLines <= _maxLines) return;
 
       int removeLines = totalLines - _maxLines;
       if (removeLines <= 0) return;
 
-      int start = log.GetFirstCharIndexFromLine(0);
-      int end = log.GetFirstCharIndexFromLine(removeLines);
+      int start = 0;
+      int end = inner.GetFirstCharIndexFromLine(removeLines);
       if (end > start)
       {
-        int selStart = log.SelectionStart;
-        int selLen = log.SelectionLength;
+        int selStart = inner.SelectionStart;
+        int selLen = inner.SelectionLength;
 
-        log.Select(start, end - start);
-        log.SelectedText = string.Empty;
+        inner.Select(start, end - start);
+        inner.SelectedText = string.Empty;
 
-        // restore selection at a sensible place
-        log.SelectionStart = Math.Max(0, selStart - (end - start));
-        log.SelectionLength = selLen;
+        inner.SelectionStart = Math.Max(0, selStart - (end - start));
+        inner.SelectionLength = selLen;
       }
     }
 
-    private void BeginUpdate()
+    private static void SnapToBottom(TextBox inner)
     {
-      if (!log.IsHandleCreated) return;
-      SendMessage(log.Handle, WM_SETREDRAW, IntPtr.Zero, IntPtr.Zero);
-    }
+      int totalLines = Math.Max(1, (int)SendMessage(inner.Handle, EM_GETLINECOUNT, IntPtr.Zero, IntPtr.Zero));
+      int first = (int)SendMessage(inner.Handle, EM_GETFIRSTVISIBLELINE, IntPtr.Zero, IntPtr.Zero);
+      int bottomChar = inner.GetCharIndexFromPosition(new Point(1, Math.Max(1, inner.ClientSize.Height - 1)));
+      int bottomLine = inner.GetLineFromCharIndex(bottomChar);
+      int visible = Math.Max(1, bottomLine - first + 1);
 
-    private void EndUpdate()
-    {
-      if (!log.IsHandleCreated) return;
-      SendMessage(log.Handle, WM_SETREDRAW, (IntPtr)1, IntPtr.Zero);
-      log.Invalidate();
-    }
-
-    protected override void Dispose(bool disposing)
-    {
-      if (disposing)
+      int targetFirst = Math.Max(0, totalLines - visible);
+      int delta = targetFirst - first;
+      if (delta != 0)
       {
-        vbar?.UnhookAll();
+        SendMessage(inner.Handle, EM_LINESCROLL, IntPtr.Zero, (IntPtr)delta);
       }
-      base.Dispose(disposing);
+    }
+
+    private static void BeginUpdate(TextBox inner)
+    {
+      if (inner == null || !inner.IsHandleCreated) return;
+      SendMessage(inner.Handle, WM_SETREDRAW, IntPtr.Zero, IntPtr.Zero);
+    }
+
+    private static void EndUpdate(TextBox inner)
+    {
+      if (inner == null || !inner.IsHandleCreated) return;
+      SendMessage(inner.Handle, WM_SETREDRAW, (IntPtr)1, IntPtr.Zero);
+      inner.Invalidate();
     }
 
   } // class ConsoleLogControl
+
+
+  /// <summary>
+  /// Flat PoisonTextBox: removes PoisonTextBox border/outline and enforces our dark text/bg.
+  /// </summary>
+  internal class FlatPoisonTextBox : PoisonTextBox
+  {
+    protected override void OnPaintForeground(PaintEventArgs e)
+    {
+      // Ensure inner PromptedTextBox uses our colors (no white outlines/forecolor regressions)
+      if (Controls.Count > 0 && Controls[0] is TextBox inner)
+      {
+        inner.BackColor = BackColor;
+        inner.ForeColor = ForeColor;
+      }
+
+      // Intentionally skip drawing the default PoisonTextBox border/outline.
+      // No base.OnPaintForeground(e) here to avoid the white rectangle.
+    }
+  }
 
 } // Namespace SwimEditor
