@@ -7,8 +7,9 @@ namespace SwimEditor
 {
 
   /// <summary>
-  /// Custom dark-themed TreeView with integrated DarkScrollBar.
-  /// Hides the native scrollbar and uses a custom vertical scrollbar.
+  /// Custom dark-themed TreeView with integrated DarkScrollBars (vertical and horizontal).
+  /// Hides the native scrollbars and uses custom scrollbars.
+  /// Vertical scrollbar takes full height, horizontal scrollbar excludes vertical scrollbar area.
   /// </summary>
   public class DarkTreeView : TreeView
   {
@@ -27,7 +28,10 @@ namespace SwimEditor
     [DllImport("user32.dll")]
     private static extern int SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
 
+    private const int SB_HORZ = 0;
     private const int SB_VERT = 1;
+    private const int SB_BOTH = 3;
+    private const int WM_HSCROLL = 0x0114;
     private const int WM_VSCROLL = 0x0115;
     private const int WM_MOUSEWHEEL = 0x020A;
     private const int WM_SIZE = 0x0005;
@@ -39,7 +43,9 @@ namespace SwimEditor
     private const int WS_VSCROLL = 0x00200000;
 
     private DarkScrollBar vScrollBar;
-    private Panel scrollBarHost;
+    private DarkScrollBar hScrollBar;
+    private Panel vScrollBarHost;
+    private Panel hScrollBarHost;
     private bool suppressScrollSync = false;
 
     public DarkTreeView()
@@ -50,15 +56,15 @@ namespace SwimEditor
       ForeColor = SwimEditorTheme.Fg;
       LineColor = SwimEditorTheme.Line;
 
-      // Create host panel for scrollbar
-      scrollBarHost = new Panel
+      // Create host panel for vertical scrollbar (full height, docked right)
+      vScrollBarHost = new Panel
       {
         Dock = DockStyle.Right,
         Width = 16,
         BackColor = SwimEditorTheme.PageBg
       };
 
-      // Create dark scrollbar
+      // Create vertical scrollbar
       vScrollBar = new DarkScrollBar
       {
         Dock = DockStyle.Fill,
@@ -66,15 +72,40 @@ namespace SwimEditor
         Width = 16
       };
 
+      // Create host panel for horizontal scrollbar (docked bottom)
+      hScrollBarHost = new Panel
+      {
+        Dock = DockStyle.Bottom,
+        Height = 16,
+        BackColor = SwimEditorTheme.PageBg
+      };
+
+      // Create horizontal scrollbar
+      hScrollBar = new DarkScrollBar
+      {
+        Dock = DockStyle.Fill,
+        AutoHide = true,
+        Height = 16,
+        Orientation = ScrollOrientation.HorizontalScroll
+      };
+
       // Wire up events
-      vScrollBar.ScrollValueChanged += OnScrollBarValueChanged;
+      vScrollBar.ScrollValueChanged += OnVScrollBarValueChanged;
+      hScrollBar.ScrollValueChanged += OnHScrollBarValueChanged;
 
-      // Add scrollbar to host, host to tree
-      scrollBarHost.Controls.Add(vScrollBar);
-      Controls.Add(scrollBarHost);
+      // Add scrollbars to hosts
+      vScrollBarHost.Controls.Add(vScrollBar);
+      hScrollBarHost.Controls.Add(hScrollBar);
 
-      // Hook the scrollbar to this control
-      vScrollBar.SetScrollHooks(this, scrollBarHost, SyncScrollBarToTree);
+      // Add hosts to tree - ORDER MATTERS!
+      // Add horizontal first (bottom), then vertical (right)
+      // This way vertical will extend to full height, and horizontal will stop before vertical
+      Controls.Add(hScrollBarHost);
+      Controls.Add(vScrollBarHost);
+
+      // Hook the scrollbars to this control
+      vScrollBar.SetScrollHooks(this, vScrollBarHost, SyncVScrollBarToTree);
+      hScrollBar.SetScrollHooks(this, hScrollBarHost, SyncHScrollBarToTree);
     }
 
     /// <summary>
@@ -94,55 +125,52 @@ namespace SwimEditor
     protected override void OnHandleCreated(EventArgs e)
     {
       base.OnHandleCreated(e);
-      HideNativeScrollBar();
-      UpdateScrollBar();
+      HideNativeScrollBars();
+      UpdateScrollBars();
     }
 
-    private void HideNativeScrollBar()
+    private void HideNativeScrollBars()
     {
       if (IsHandleCreated)
       {
-        // Ensure the native scrollbar is hidden; call frequently after layout/size/style changes.
-        ShowScrollBar(Handle, SB_VERT, false);
+        // Ensure the native scrollbars are hidden
+        ShowScrollBar(Handle, SB_BOTH, false);
       }
     }
 
     protected override void OnAfterExpand(TreeViewEventArgs e)
     {
       base.OnAfterExpand(e);
-      HideNativeScrollBar();
-      UpdateScrollBar();
+      HideNativeScrollBars();
+      UpdateScrollBars();
     }
 
     protected override void OnAfterCollapse(TreeViewEventArgs e)
     {
       base.OnAfterCollapse(e);
-      HideNativeScrollBar();
-      UpdateScrollBar();
+      HideNativeScrollBars();
+      UpdateScrollBars();
     }
 
     protected override void OnNodeMouseClick(TreeNodeMouseClickEventArgs e)
     {
       base.OnNodeMouseClick(e);
-      HideNativeScrollBar();
-      UpdateScrollBar();
+      HideNativeScrollBars();
+      UpdateScrollBars();
     }
 
     protected override void OnAfterSelect(TreeViewEventArgs e)
     {
       base.OnAfterSelect(e);
-      HideNativeScrollBar();
-      UpdateScrollBar();
+      HideNativeScrollBars();
+      UpdateScrollBars();
     }
 
     protected override void OnResize(EventArgs e)
     {
       base.OnResize(e);
-
-      // Critical fix: resizing could cause the OS to re-evaluate scroll need and re-show the native bar.
-      // Hide it again here and then sync/update the custom bar.
-      HideNativeScrollBar();
-      UpdateScrollBar();
+      HideNativeScrollBars();
+      UpdateScrollBars();
     }
 
     protected override void OnVisibleChanged(EventArgs e)
@@ -150,8 +178,8 @@ namespace SwimEditor
       base.OnVisibleChanged(e);
       if (Visible)
       {
-        HideNativeScrollBar();
-        UpdateScrollBar();
+        HideNativeScrollBars();
+        UpdateScrollBars();
       }
     }
 
@@ -159,15 +187,17 @@ namespace SwimEditor
     {
       base.WndProc(ref m);
 
-      // Ensure native scrollbar stays hidden after style/size changes or wheel scrolling.
+      // Ensure native scrollbars stay hidden after style/size changes or scrolling
       switch (m.Msg)
       {
         case WM_VSCROLL:
+        case WM_HSCROLL:
         case WM_MOUSEWHEEL:
           BeginInvoke(new Action(() =>
           {
-            HideNativeScrollBar();
-            SyncScrollBarToTree();
+            HideNativeScrollBars();
+            SyncVScrollBarToTree();
+            SyncHScrollBarToTree();
           }));
           break;
 
@@ -175,17 +205,26 @@ namespace SwimEditor
         case WM_STYLECHANGED:
           BeginInvoke(new Action(() =>
           {
-            HideNativeScrollBar();
-            UpdateScrollBar();
+            HideNativeScrollBars();
+            UpdateScrollBars();
           }));
           break;
       }
     }
 
     /// <summary>
-    /// Updates the scrollbar range based on TreeView's native scroll info.
+    /// Updates both scrollbars based on TreeView's native scroll info.
     /// </summary>
-    private void UpdateScrollBar()
+    private void UpdateScrollBars()
+    {
+      UpdateVScrollBar();
+      UpdateHScrollBar();
+    }
+
+    /// <summary>
+    /// Updates the vertical scrollbar range based on TreeView's native scroll info.
+    /// </summary>
+    private void UpdateVScrollBar()
     {
       if (!IsHandleCreated || vScrollBar == null)
         return;
@@ -198,15 +237,13 @@ namespace SwimEditor
           int visibleItems = GetVisibleItemCount();
           int totalItems = GetTotalVisibleNodeCount();
 
-          // If there's actual scrollable content
           if (totalItems > visibleItems && max > min)
           {
             vScrollBar.SetRange(min, max, visibleItems, 1);
-            SyncScrollBarToTree();
+            SyncVScrollBarToTree();
           }
           else
           {
-            // No scrolling needed
             vScrollBar.SetRange(0, 0, 1, 1);
           }
         }
@@ -222,9 +259,44 @@ namespace SwimEditor
     }
 
     /// <summary>
-    /// Syncs the DarkScrollBar position to match TreeView's current scroll position.
+    /// Updates the horizontal scrollbar range based on TreeView's native scroll info.
     /// </summary>
-    private void SyncScrollBarToTree()
+    private void UpdateHScrollBar()
+    {
+      if (!IsHandleCreated || hScrollBar == null)
+        return;
+
+      try
+      {
+        int min, max;
+        if (GetScrollRange(Handle, SB_HORZ, out min, out max))
+        {
+          if (max > min)
+          {
+            int viewWidth = ClientSize.Width - vScrollBarHost.Width;
+            hScrollBar.SetRange(min, max, viewWidth, 10);
+            SyncHScrollBarToTree();
+          }
+          else
+          {
+            hScrollBar.SetRange(0, 0, 1, 1);
+          }
+        }
+        else
+        {
+          hScrollBar.SetRange(0, 0, 1, 1);
+        }
+      }
+      catch
+      {
+        hScrollBar.SetRange(0, 0, 1, 1);
+      }
+    }
+
+    /// <summary>
+    /// Syncs the vertical DarkScrollBar position to match TreeView's current scroll position.
+    /// </summary>
+    private void SyncVScrollBarToTree()
     {
       if (!IsHandleCreated || vScrollBar == null || suppressScrollSync)
         return;
@@ -242,9 +314,29 @@ namespace SwimEditor
     }
 
     /// <summary>
-    /// Handles scrollbar value changes and scrolls the TreeView accordingly.
+    /// Syncs the horizontal DarkScrollBar position to match TreeView's current scroll position.
     /// </summary>
-    private void OnScrollBarValueChanged(int newValue)
+    private void SyncHScrollBarToTree()
+    {
+      if (!IsHandleCreated || hScrollBar == null || suppressScrollSync)
+        return;
+
+      try
+      {
+        suppressScrollSync = true;
+        int pos = GetScrollPos(Handle, SB_HORZ);
+        hScrollBar.Value = pos;
+      }
+      finally
+      {
+        suppressScrollSync = false;
+      }
+    }
+
+    /// <summary>
+    /// Handles vertical scrollbar value changes and scrolls the TreeView accordingly.
+    /// </summary>
+    private void OnVScrollBarValueChanged(int newValue)
     {
       if (!IsHandleCreated || suppressScrollSync)
         return;
@@ -252,13 +344,29 @@ namespace SwimEditor
       try
       {
         suppressScrollSync = true;
-
-        // Set the native scroll position
         SetScrollPos(Handle, SB_VERT, newValue, true);
-
-        // Notify TreeView to redraw at new position
         SendMessage(Handle, WM_VSCROLL, (IntPtr)(SB_THUMBPOSITION | (newValue << 16)), IntPtr.Zero);
+        Invalidate();
+      }
+      finally
+      {
+        suppressScrollSync = false;
+      }
+    }
 
+    /// <summary>
+    /// Handles horizontal scrollbar value changes and scrolls the TreeView accordingly.
+    /// </summary>
+    private void OnHScrollBarValueChanged(int newValue)
+    {
+      if (!IsHandleCreated || suppressScrollSync)
+        return;
+
+      try
+      {
+        suppressScrollSync = true;
+        SetScrollPos(Handle, SB_HORZ, newValue, true);
+        SendMessage(Handle, WM_HSCROLL, (IntPtr)(SB_THUMBPOSITION | (newValue << 16)), IntPtr.Zero);
         Invalidate();
       }
       finally
@@ -283,7 +391,7 @@ namespace SwimEditor
 
         int itemHeight = firstVisible.Bounds.Height;
         if (itemHeight <= 0)
-          itemHeight = 20; // default fallback
+          itemHeight = 20;
 
         int visibleCount = Math.Max(1, ClientSize.Height / itemHeight);
         return visibleCount;
@@ -312,7 +420,7 @@ namespace SwimEditor
       if (node == null)
         return 0;
 
-      int count = 1; // the node itself
+      int count = 1;
 
       if (node.IsExpanded)
       {
@@ -330,8 +438,8 @@ namespace SwimEditor
     /// </summary>
     public void RefreshScrollBar()
     {
-      HideNativeScrollBar();
-      UpdateScrollBar();
+      HideNativeScrollBars();
+      UpdateScrollBars();
     }
 
     protected override void Dispose(bool disposing)
@@ -345,10 +453,23 @@ namespace SwimEditor
           vScrollBar = null;
         }
 
-        if (scrollBarHost != null)
+        if (hScrollBar != null)
         {
-          scrollBarHost.Dispose();
-          scrollBarHost = null;
+          hScrollBar.UnhookAll();
+          hScrollBar.Dispose();
+          hScrollBar = null;
+        }
+
+        if (vScrollBarHost != null)
+        {
+          vScrollBarHost.Dispose();
+          vScrollBarHost = null;
+        }
+
+        if (hScrollBarHost != null)
+        {
+          hScrollBarHost.Dispose();
+          hScrollBarHost = null;
         }
       }
 
