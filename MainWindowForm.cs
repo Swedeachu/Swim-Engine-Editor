@@ -10,6 +10,7 @@ namespace SwimEditor
     private DockPanel dockPanel;
     private ThemeBase theme;
 
+    // these 2 are unused
     private CrownMenuStrip mainMenu;
     private CrownToolStrip mainToolbar;
 

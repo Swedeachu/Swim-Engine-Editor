@@ -1,4 +1,5 @@
 ﻿using ReaLTaiizor.Controls;
+using System.Diagnostics;
 
 namespace SwimEditor
 {
@@ -109,7 +110,7 @@ namespace SwimEditor
       AddGenericIcons(_largeImages, _smallImages);
 
       // Right panel list
-      _list = new ListView      
+      _list = new ListView
       {
         Dock = DockStyle.Fill,
         View = View.LargeIcon,
@@ -935,6 +936,7 @@ namespace SwimEditor
     {
       if (!IsHandleCreated || _split == null) return;
 
+      // Compute desired distance based on the *current* size.
       int total = Math.Max(1, _split.ClientSize.Width);
       int min1 = Math.Max(0, _split.Panel1MinSize);
       int min2 = Math.Max(0, _split.Panel2MinSize);
@@ -948,19 +950,57 @@ namespace SwimEditor
       else
         desired = Clamp(desired, min1, maxAllowed);
 
+      // Only attempt if it would actually change something.
       if (desired >= min1 && desired <= maxAllowed && _split.SplitterDistance != desired)
       {
-        try
+        // Try once with the computed bounds; if layout shifted in-flight, recompute and try once more.
+        if (!TrySetSplitterDistance(_split, desired))
         {
-          _split.SplitterDistance = desired;
-        }
-        catch
-        {
-          _split.SplitterDistance = min1;
+          // As a last resort, use Panel1's minimum; this is guaranteed valid.
+          // If *that* fails, log it and bail.
+          if (!TrySetSplitterDistance(_split, _split.Panel1MinSize))
+          {
+            Debug.WriteLine("ApplyInitialLeftWidth: Failed to set SplitterDistance even to Panel1MinSize.");
+          }
         }
       }
 
       _layoutInitialized = true;
+    }
+
+    private static bool TrySetSplitterDistance(SplitContainer split, int requested)
+    {
+      // Refresh bounds in case layout changed since last read.
+      int total = Math.Max(1, split.ClientSize.Width);
+      int min1 = Math.Max(0, split.Panel1MinSize);
+      int min2 = Math.Max(0, split.Panel2MinSize);
+      int splitterW = Math.Max(0, split.SplitterWidth);
+
+      // If the panels + splitter fully occupy the width, only min1 is valid.
+      int maxAllowed = (total <= (min1 + min2 + splitterW))
+                     ? min1
+                     : Math.Max(min1, total - min2 - splitterW);
+
+      int clamped = Clamp(requested, min1, maxAllowed);
+
+      if (split.SplitterDistance == clamped)
+        return true;
+
+      try
+      {
+        split.SplitterDistance = clamped;
+        return true;
+      }
+      catch (InvalidOperationException ioe)
+      {
+        // Happens if bounds changed between validation and assignment.
+        return false;
+      }
+      catch (ArgumentOutOfRangeException aoore)
+      {
+        // Be explicit about out-of-range too (rare but possible during rapid resizes).
+        return false;
+      }
     }
 
     private static int Clamp(int value, int min, int max)

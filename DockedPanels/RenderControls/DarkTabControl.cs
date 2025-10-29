@@ -1,9 +1,4 @@
-﻿using SwimEditor;
-using System.Drawing;
-using System.Windows.Forms;
-using System;
-
-namespace SwimEditor
+﻿namespace SwimEditor
 {
 
   public class DarkTabControl : TabControl
