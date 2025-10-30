@@ -1,4 +1,8 @@
-﻿using WeifenLuo.WinFormsUI.Docking;
+﻿using System;
+using System.IO;
+using System.Drawing;
+using System.Windows.Forms;
+using WeifenLuo.WinFormsUI.Docking;
 using ReaLTaiizor.Controls;
 
 namespace SwimEditor
@@ -20,6 +24,11 @@ namespace SwimEditor
     private UtilityDock console;
 
     private string layoutPath;
+
+    // transport buttons (stored as fields so we can update state/colors)
+    private CrownButton playButton;
+    private CrownButton pauseButton;
+    private CrownButton stopButton;
 
     public MainWindowForm()
     {
@@ -70,7 +79,7 @@ namespace SwimEditor
           Padding = new Padding(10, 2, 10, 2),
           BackColor = SwimEditorTheme.Bg,
           ForeColor = SwimEditorTheme.Text,
-          TabStop = false  // prevents focus and thus avoids blue outline
+          TabStop = false // prevents focus and thus avoids blue outline
         };
 
         // Disable any remaining focus/hover highlight
@@ -79,9 +88,9 @@ namespace SwimEditor
         return btn;
       }
 
-      var playButton = MakeBtn("Play");
-      var pauseButton = MakeBtn("Pause");
-      var stopButton = MakeBtn("Stop");
+      playButton = MakeBtn("Play");
+      pauseButton = MakeBtn("Pause");
+      stopButton = MakeBtn("Stop");
 
       // subtle hover cue
       void AccentOn(object? s, EventArgs e) => ((CrownButton)s!).ForeColor = SwimEditorTheme.Accent;
@@ -91,6 +100,11 @@ namespace SwimEditor
         b.MouseEnter += AccentOn;
         b.MouseLeave += AccentOff;
       }
+
+      // wire clicks
+      playButton.Click += OnPlayClicked;
+      pauseButton.Click += OnPauseClicked;
+      stopButton.Click += OnStopClicked;
 
       centerRow.Controls.Add(playButton);
       centerRow.Controls.Add(pauseButton);
@@ -145,10 +159,32 @@ namespace SwimEditor
       // Make it so game view cout stream callback logs to the console
       gameView.EngineConsoleLine += line => console.AppendLog(line);
 
+      // keep inspector synced
       hierarchy.OnSelectionChanged += obj => inspector.SetInspectedObject(obj);
+
+      // Initial toolbar: assume the GameView will auto-start the engine on Shown.
+      // We want Play disabled, Pause/Stop enabled right away.
+      playButton.Enabled = false;
+      pauseButton.Enabled = true;
+      stopButton.Enabled = true;
+      SetActive(playButton, false);
+      SetActive(pauseButton, false);
+      SetActive(stopButton, false);
+
+      // When the engine actually starts/stops/pauses, keep the toolbar in sync.
+      gameView.EngineStateChanged += () =>
+      {
+        // marshal UI update
+        if (InvokeRequired) BeginInvoke(new Action(UpdateTransportUi));
+        else UpdateTransportUi();
+      };
 
       // Only load layout if it exists; it will override sizes
       LoadLayoutIfExists();
+
+      // Final pass (in case layout changes visibility/creation timing)
+      // Schedule after idle to catch GameView’s Shown/start.
+      BeginInvoke(new Action(UpdateTransportUi));
     }
 
     private void LoadLayoutIfExists()
@@ -194,6 +230,78 @@ namespace SwimEditor
       {
         // Ignore save errors
       }
+    }
+
+    // --- Transport logic wiring ---
+
+    private void OnPlayClicked(object? sender, EventArgs e)
+    {
+      // safety: play does nothing if already active (running and not paused)
+      if (gameView != null && !(gameView.IsEngineRunning && !gameView.IsEnginePaused))
+      {
+        gameView.PlayEngine(); // starts or resumes as needed
+        UpdateTransportUi();
+      }
+    }
+
+    private void OnPauseClicked(object? sender, EventArgs e)
+    {
+      if (gameView == null || !gameView.IsEngineRunning) return;
+
+      if (!gameView.IsEnginePaused)
+        gameView.PauseEngine();
+      else
+        gameView.ResumeEngine();
+
+      UpdateTransportUi();
+    }
+
+    private void OnStopClicked(object? sender, EventArgs e)
+    {
+      if (gameView == null || !gameView.IsEngineRunning) return;
+
+      gameView.StopEngine();
+      UpdateTransportUi();
+    }
+
+    private void UpdateTransportUi()
+    {
+      if (gameView == null)
+      {
+        SetBtnState(active: false, play: true, pause: false, stop: false);
+        return;
+      }
+
+      bool running = gameView.IsEngineRunning;
+      bool paused = gameView.IsEnginePaused;
+
+      // Enablement rules
+      playButton.Enabled = !running || paused; // can play if not running or paused
+      pauseButton.Enabled = running;            // only when running
+      stopButton.Enabled = running;            // only when running
+
+      // Visual state (simple color UX)
+      SetActive(playButton, running && !paused);
+      SetActive(pauseButton, running && paused);
+      SetActive(stopButton, false);
+    }
+
+    private void SetBtnState(bool active, bool play, bool pause, bool stop)
+    {
+      playButton.Enabled = play;
+      pauseButton.Enabled = pause;
+      stopButton.Enabled = stop;
+
+      SetActive(playButton, active);
+      SetActive(pauseButton, false);
+      SetActive(stopButton, false);
+    }
+
+    private void SetActive(CrownButton btn, bool active)
+    {
+      // Accent background for active, keep others on Bg
+      btn.BackColor = active ? SwimEditorTheme.Accent : SwimEditorTheme.Bg;
+      btn.ForeColor = active ? Color.Black : SwimEditorTheme.Text;
     }
 
   } // class MainWindowForm

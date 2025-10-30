@@ -1,11 +1,9 @@
-﻿using System;
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
-using System.Windows.Forms;
-using System.Drawing;
 using WeifenLuo.WinFormsUI.Docking;
 using Timer = System.Windows.Forms.Timer;
+using System.ComponentModel;
 
 namespace SwimEditor
 {
@@ -36,6 +34,33 @@ namespace SwimEditor
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool PostThreadMessage(uint idThread, uint Msg, IntPtr wParam, IntPtr lParam);
 
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern IntPtr CreateToolhelp32Snapshot(uint dwFlags, uint th32ProcessID);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool Thread32First(IntPtr hSnapshot, ref THREADENTRY32 lpte);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool Thread32Next(IntPtr hSnapshot, ref THREADENTRY32 lpte);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern IntPtr OpenThread(uint dwDesiredAccess, bool bInheritHandle, uint dwThreadId);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern uint SuspendThread(IntPtr hThread);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern uint ResumeThread(IntPtr hThread);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool CloseHandle(IntPtr hObject);
+
+    [DllImport("ntdll.dll")] private static extern int NtSuspendProcess(IntPtr processHandle);
+    [DllImport("ntdll.dll")] private static extern int NtResumeProcess(IntPtr processHandle);
+
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct THREADENTRY32
+    {
+      public uint dwSize;
+      public uint cntUsage;
+      public uint th32ThreadID;
+      public uint th32OwnerProcessID;
+      public int tpBasePri;
+      public int tpDeltaPri;
+      public uint dwFlags;
+    }
+
+    private const uint TH32CS_SNAPTHREAD = 0x00000004;
+    private const uint THREAD_SUSPEND_RESUME = 0x0002;
+
     private const uint WM_CLOSE = 0x0010;
     private const uint WM_QUIT = 0x0012;
     private const uint SMTO_ABORTIFHUNG = 0x0002;
@@ -53,6 +78,9 @@ namespace SwimEditor
     // Subscribe to receive each console line from the engine.
     public event Action<string> EngineConsoleLine;
 
+    // Notify editor to refresh transport UI when engine state changes
+    public event Action EngineStateChanged;
+
     private DataReceivedEventHandler outputHandler;
     private DataReceivedEventHandler errorHandler;
     private Timer childPollTimer;
@@ -61,6 +89,12 @@ namespace SwimEditor
     private IntPtr parkingHwnd = IntPtr.Zero;
 
     private bool shuttingDown = false;
+
+    // state property for pause
+    public bool IsEngineRunning => engineProcess != null && !engineProcess.HasExited;
+
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public bool IsEnginePaused { get; private set; } = false;
 
     // P/Invoke for focus and child enumeration
     private delegate bool EnumChildProc(IntPtr hWnd, IntPtr lParam);
@@ -94,6 +128,146 @@ namespace SwimEditor
       Shown += (_, __) => StartEngineIfNeeded();
       FormClosing += OnGameViewDockClosing;
       FormClosed += (_, __) => StopEngineIfNeeded();
+    }
+
+    public void PlayEngine()
+    {
+      // If not running, start it
+      if (!IsEngineRunning)
+      {
+        shuttingDown = false;
+        StartEngineIfNeeded();
+        IsEnginePaused = false;
+        RaiseEngineStateChanged();
+        return;
+      }
+
+      // If paused, resume
+      if (IsEnginePaused)
+      {
+        ResumeEngine();
+      }
+      // else already running → do nothing (safety)
+    }
+
+    public void StopEngine()
+    {
+      if (!IsEngineRunning) return;
+
+      shuttingDown = true;     // disable parking so child can be destroyed
+      IsEnginePaused = false;  // reset our flag
+
+      // Ask nicely to quit (WM_QUIT + WM_CLOSE)
+      RequestEngineClose();
+
+      // Do not block UI; cleanup on a small timer
+      var t = new Timer { Interval = 200 };
+      t.Tick += (s, e) =>
+      {
+        if (engineProcess == null || engineProcess.HasExited)
+        {
+          t.Stop();
+          t.Dispose();
+          StopEngineIfNeeded(); // final cleanup (disposes process, clears handles)
+          RaiseEngineStateChanged();
+        }
+      };
+      t.Start();
+    }
+
+    public void PauseEngine()
+    {
+      if (!IsEngineRunning || IsEnginePaused) return;
+
+      try
+      {
+        // Suspend only the child process; editor stays responsive.
+        NtSuspendProcess(engineProcess.Handle);
+        IsEnginePaused = true;
+        RaiseEngineStateChanged();
+      }
+      catch
+      {
+        // ignore failures; keep state consistent
+        IsEnginePaused = false;
+        RaiseEngineStateChanged();
+      }
+    }
+
+    public void ResumeEngine()
+    {
+      if (!IsEngineRunning || !IsEnginePaused) return;
+
+      try
+      {
+        NtResumeProcess(engineProcess.Handle);
+        IsEnginePaused = false;
+        RaiseEngineStateChanged();
+      }
+      catch
+      {
+        // ignore
+      }
+    }
+
+    private void SuspendAllThreadsOf(Process p)
+    {
+      IntPtr snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+      if (snap == IntPtr.Zero || snap == (IntPtr)(-1)) return;
+
+      try
+      {
+        var te = new THREADENTRY32 { dwSize = (uint)Marshal.SizeOf<THREADENTRY32>() };
+        if (!Thread32First(snap, ref te)) return;
+
+        do
+        {
+          if (te.th32OwnerProcessID == (uint)p.Id)
+          {
+            IntPtr hThread = OpenThread(THREAD_SUSPEND_RESUME, false, te.th32ThreadID);
+            if (hThread != IntPtr.Zero)
+            {
+              try { SuspendThread(hThread); }
+              finally { CloseHandle(hThread); }
+            }
+          }
+        }
+        while (Thread32Next(snap, ref te));
+      }
+      finally
+      {
+        CloseHandle(snap);
+      }
+    }
+
+    private void ResumeAllThreadsOf(Process p)
+    {
+      IntPtr snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+      if (snap == IntPtr.Zero || snap == (IntPtr)(-1)) return;
+
+      try
+      {
+        var te = new THREADENTRY32 { dwSize = (uint)Marshal.SizeOf<THREADENTRY32>() };
+        if (!Thread32First(snap, ref te)) return;
+
+        do
+        {
+          if (te.th32OwnerProcessID == (uint)p.Id)
+          {
+            IntPtr hThread = OpenThread(THREAD_SUSPEND_RESUME, false, te.th32ThreadID);
+            if (hThread != IntPtr.Zero)
+            {
+              try { while (ResumeThread(hThread) > 0) { /* resume fully */ } }
+              finally { CloseHandle(hThread); }
+            }
+          }
+        }
+        while (Thread32Next(snap, ref te));
+      }
+      finally
+      {
+        CloseHandle(snap);
+      }
     }
 
     // Tiny hidden window we can parent the child to while the panel handle is being recreated
@@ -213,6 +387,12 @@ namespace SwimEditor
         engineProcess.BeginOutputReadLine();
         engineProcess.BeginErrorReadLine();
 
+        // Keep UI in sync when process exits on its own
+        engineProcess.Exited += (_, __) =>
+        {
+          try { BeginInvoke(new Action(() => { RaiseEngineStateChanged(); })); } catch { }
+        };
+
         // Poll for the child window (created by the engine with class name "SwimEngine")
         childPollTimer?.Stop();
         childPollTimer?.Dispose();
@@ -227,6 +407,7 @@ namespace SwimEditor
           {
             childPollTimer.Stop();
             AfterChildDiscovered();
+            RaiseEngineStateChanged();
           }
         };
         childPollTimer.Start();
@@ -269,6 +450,7 @@ namespace SwimEditor
       if (renderSurface is DoubleBufferedPanel panel)
       {
         panel.SetChildWindow(engineChildHwnd);
+        panel.SetPausedProvider(() => IsEnginePaused); // NEW: let panel know when paused
       }
 
       SetFocus(engineChildHwnd);
@@ -358,6 +540,8 @@ namespace SwimEditor
         engineProcess?.Dispose();
         engineProcess = null;
         engineChildHwnd = IntPtr.Zero;
+
+        RaiseEngineStateChanged();
       }
     }
 
@@ -375,9 +559,21 @@ namespace SwimEditor
       EngineConsoleLine?.Invoke(line);
     }
 
+    private void RaiseEngineStateChanged()
+    {
+      try { EngineStateChanged?.Invoke(); } catch { }
+    }
+
     private class DoubleBufferedPanel : Panel
     {
       private IntPtr childHwnd = IntPtr.Zero;
+
+      private Func<bool> isPausedProvider;
+
+      public void SetPausedProvider(Func<bool> provider)
+      {
+        isPausedProvider = provider;
+      }
 
       public void SetChildWindow(IntPtr hwnd)
       {
@@ -421,10 +617,25 @@ namespace SwimEditor
         {
           if ((m.Msg >= WM_MOUSEMOVE && m.Msg <= WM_MOUSEWHEEL) || (m.Msg >= WM_KEYDOWN && m.Msg <= WM_SYSKEYUP))
           {
-            SendMessage(childHwnd, (uint)m.Msg, m.WParam, m.LParam);
-            if (m.Msg >= WM_KEYDOWN && m.Msg <= WM_SYSKEYUP)
+            bool paused = isPausedProvider != null && isPausedProvider();
+
+            // When paused: PostMessage so we don't block the editor UI on a suspended engine.
+            // When running: SendMessage is fine (synchronous hit testing, etc.).
+            if (paused)
             {
-              return; // Don't pass keyboard to base
+              PostMessage(childHwnd, (uint)m.Msg, m.WParam, m.LParam);
+              if (m.Msg >= WM_KEYDOWN && m.Msg <= WM_SYSKEYUP)
+              {
+                return; // Don't pass keyboard to base
+              }
+            }
+            else
+            {
+              SendMessage(childHwnd, (uint)m.Msg, m.WParam, m.LParam);
+              if (m.Msg >= WM_KEYDOWN && m.Msg <= WM_SYSKEYUP)
+              {
+                return; // Don't pass keyboard to base
+              }
             }
           }
         }
