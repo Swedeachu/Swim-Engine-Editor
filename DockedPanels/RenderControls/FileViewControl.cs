@@ -11,20 +11,20 @@ namespace SwimEditor
   /// </summary>
   public class FileViewControl : UserControl
   {
-    private readonly SplitContainer _split;
+    private readonly SplitContainer split;
 
     // LEFT: CrownTreeView
-    private readonly CrownTreeView _tree;
+    private readonly CrownTreeView tree;
 
     // RIGHT: ListView + toolbar + path box
-    private readonly ListView _list;
-    private readonly ImageList _largeImages;
-    private readonly ImageList _smallImages;
-    private readonly ToolStrip _tool;
-    private readonly TextBox _pathBox;
+    private readonly ListView list;
+    private readonly ImageList largeImages;
+    private readonly ImageList smallImages;
+    private readonly ToolStrip tool;
+    private readonly TextBox pathBox;
 
     // Starting focus path (what the right side opens to on load / SetRoot)
-    private string _rootPath;
+    private string rootPath;
 
     // Keep trees responsive on giant folders
     private const int MaxTreeChildrenPerFolder = 500;
@@ -41,18 +41,18 @@ namespace SwimEditor
     private const double LeftInitialPortion = 0.20; // % of control width at creation
     private const int LeftMinPixels = 220;          // min starting width
 
-    private bool _layoutInitialized = false;
-    private bool _userAdjustedSplitter = false;
+    private bool layoutInitialized = false;
+    private bool userAdjustedSplitter = false;
 
     // Re-entrancy guards
-    private bool _suppressSelectionNavigate = false; // tree selection -> NavigateTo
-    private bool _suppressTreeSync = false;          // NavigateTo -> SelectTreeNodeForPath
+    private bool suppressSelectionNavigate = false; // tree selection -> NavigateTo
+    private bool suppressTreeSync = false;          // NavigateTo -> SelectTreeNodeForPath
 
     public FileViewControl()
     {
       BackColor = SwimEditorTheme.PageBg;
 
-      _split = new SplitContainer
+      split = new SplitContainer
       {
         Dock = DockStyle.Fill,
         SplitterWidth = 4,
@@ -62,7 +62,7 @@ namespace SwimEditor
       };
 
       // CrownTreeView
-      _tree = new CrownTreeView
+      tree = new CrownTreeView
       {
         Dock = DockStyle.Fill,
         ShowIcons = true,
@@ -70,12 +70,12 @@ namespace SwimEditor
       };
 
       // Optional: keep this to ensure any already-expanded node with a placeholder gets populated.
-      _tree.AfterNodeExpand += (s, e) => PopulateAnyExpandedWithPlaceholder(_tree.Nodes);
+      tree.AfterNodeExpand += (s, e) => PopulateAnyExpandedWithPlaceholder(tree.Nodes);
 
       // Selection -> sync right list (no expand/collapse on single click)
-      _tree.SelectedNodesChanged += (s, e) =>
+      tree.SelectedNodesChanged += (s, e) =>
       {
-        var node = _tree.SelectedNodes.LastOrDefault();
+        var node = tree.SelectedNodes.LastOrDefault();
         if (node?.Tag is NodeTag tag && tag.IsDirectory && Directory.Exists(tag.Path))
         {
           // Just navigate the right pane; do NOT change node.Expanded here.
@@ -84,9 +84,9 @@ namespace SwimEditor
       };
 
       // Double-click in the tree = open (match right list behavior)
-      _tree.MouseDoubleClick += (s, e) =>
+      tree.MouseDoubleClick += (s, e) =>
       {
-        var node = _tree.SelectedNodes.LastOrDefault();
+        var node = tree.SelectedNodes.LastOrDefault();
         if (node?.Tag is NodeTag tag)
         {
           if (tag.IsDirectory && Directory.Exists(tag.Path))
@@ -105,27 +105,27 @@ namespace SwimEditor
         }
       };
 
-      _largeImages = new ImageList { ImageSize = new Size(largeSize, largeSize), ColorDepth = ColorDepth.Depth32Bit };
-      _smallImages = new ImageList { ImageSize = new Size(smallSize, smallSize), ColorDepth = ColorDepth.Depth32Bit };
-      AddGenericIcons(_largeImages, _smallImages);
+      largeImages = new ImageList { ImageSize = new Size(largeSize, largeSize), ColorDepth = ColorDepth.Depth32Bit };
+      smallImages = new ImageList { ImageSize = new Size(smallSize, smallSize), ColorDepth = ColorDepth.Depth32Bit };
+      AddGenericIcons(largeImages, smallImages);
 
       // Right panel list
-      _list = new ListView
+      list = new ListView
       {
         Dock = DockStyle.Fill,
         View = View.LargeIcon,
         BackColor = SwimEditorTheme.PageBg,
         ForeColor = SwimEditorTheme.Text,
         BorderStyle = BorderStyle.None,
-        LargeImageList = _largeImages,
-        SmallImageList = _smallImages,
+        LargeImageList = largeImages,
+        SmallImageList = smallImages,
         AutoArrange = true,
         UseCompatibleStateImageBehavior = false
       };
 
-      _list.MouseDoubleClick += (s, e) =>
+      list.MouseDoubleClick += (s, e) =>
       {
-        var hit = _list.HitTest(e.Location);
+        var hit = list.HitTest(e.Location);
         if (hit?.Item?.Tag is string path)
         {
           if (Directory.Exists(path)) NavigateTo(path);
@@ -133,7 +133,7 @@ namespace SwimEditor
         }
       };
 
-      _tool = new CrownToolStrip
+      tool = new CrownToolStrip
       {
         GripStyle = ToolStripGripStyle.Hidden,
         BackColor = SwimEditorTheme.PageBg
@@ -144,7 +144,7 @@ namespace SwimEditor
       {
         try
         {
-          var current = _list.Tag as string ?? _rootPath;
+          var current = list.Tag as string ?? rootPath;
           if (string.IsNullOrEmpty(current)) return;
           var parent = Directory.GetParent(current);
           if (parent != null) NavigateTo(parent.FullName);
@@ -159,32 +159,32 @@ namespace SwimEditor
       large.Click += (s, e) =>
       {
         large.Checked = true; details.Checked = false;
-        _list.View = View.LargeIcon;
+        list.View = View.LargeIcon;
         UpdateIconSpacingForCentering();
       };
 
       details.Click += (s, e) =>
       {
         large.Checked = false; details.Checked = true;
-        _list.View = View.Details;
-        if (_list.Columns.Count == 0)
+        list.View = View.Details;
+        if (list.Columns.Count == 0)
         {
-          _list.Columns.Add("Name", 300);
-          _list.Columns.Add("Type", 120);
-          _list.Columns.Add("Size", 100, HorizontalAlignment.Right);
-          _list.Columns.Add("Modified", 160);
+          list.Columns.Add("Name", 300);
+          list.Columns.Add("Type", 120);
+          list.Columns.Add("Size", 100, HorizontalAlignment.Right);
+          list.Columns.Add("Modified", 160);
         }
       };
 
-      _tool.Items.Add(upBtn);
-      _tool.Items.Add(viewBtn);
+      tool.Items.Add(upBtn);
+      tool.Items.Add(viewBtn);
       viewBtn.DropDownItems.Add(large);
       viewBtn.DropDownItems.Add(details);
 
       // TODO: have this as false, so on typing into this if the path is valid to a directory, it goes there.
       //       On focus leave of typing, if not a valid dir, then just change back to the last valid dir.
       // Which brings another TODO to note: file search bar, searches starting from active directory and its sub directories.
-      _pathBox = new CrownTextBox
+      pathBox = new CrownTextBox
       {
         Dock = DockStyle.Top,
         ReadOnly = true,
@@ -197,26 +197,26 @@ namespace SwimEditor
       var vBar = new CrownScrollBar { Dock = DockStyle.Right, Width = 16 };
 
       var rightContent = new ReaLTaiizor.Controls.Panel { Dock = DockStyle.Fill, BackColor = SwimEditorTheme.PageBg };
-      rightContent.Controls.Add(_list);   // ListView sits "under" the themed bars
+      rightContent.Controls.Add(list);   // ListView sits "under" the themed bars
       rightContent.Controls.Add(vBar);
 
       // Bind Crown scrollbars to ListView
-      ListViewCrownScrollBinder.Attach(_list, vBar);
+      ListViewCrownScrollBinder.Attach(list, vBar);
 
       var rightPanel = new ReaLTaiizor.Controls.Panel { Dock = DockStyle.Fill, BackColor = SwimEditorTheme.PageBg };
       rightPanel.Controls.Add(rightContent);
-      rightPanel.Controls.Add(_pathBox);
-      rightPanel.Controls.Add(_tool);
-      _tool.Dock = DockStyle.Top;
+      rightPanel.Controls.Add(pathBox);
+      rightPanel.Controls.Add(tool);
+      tool.Dock = DockStyle.Top;
 
-      _split.Panel1.Controls.Add(_tree);
-      _split.Panel2.Controls.Add(rightPanel);
-      Controls.Add(_split);
+      split.Panel1.Controls.Add(tree);
+      split.Panel2.Controls.Add(rightPanel);
+      Controls.Add(split);
 
       // --- Initial left width logic ---
       HandleCreated += (s, e) => ApplyInitialLeftWidth();
-      Resize += (s, e) => { if (!_userAdjustedSplitter) ApplyInitialLeftWidth(); };
-      _split.SplitterMoved += (s, e) => { if (_layoutInitialized) _userAdjustedSplitter = true; };
+      Resize += (s, e) => { if (!userAdjustedSplitter) ApplyInitialLeftWidth(); };
+      split.SplitterMoved += (s, e) => { if (layoutInitialized) userAdjustedSplitter = true; };
 
       // Default starting focus = running binary directory
       SetRoot(AppDomain.CurrentDomain.BaseDirectory);
@@ -228,10 +228,10 @@ namespace SwimEditor
     /// </summary>
     public void SetRoot(string startPath)
     {
-      _rootPath = startPath;
+      rootPath = startPath;
       BuildTreeForAllDrives();
 
-      string target = Directory.Exists(_rootPath) ? _rootPath : DriveInfo.GetDrives().FirstOrDefault(d => d.IsReady)?.RootDirectory.FullName;
+      string target = Directory.Exists(rootPath) ? rootPath : DriveInfo.GetDrives().FirstOrDefault(d => d.IsReady)?.RootDirectory.FullName;
 
       if (!string.IsNullOrEmpty(target))
       {
@@ -241,7 +241,7 @@ namespace SwimEditor
     }
 
     // Prevent re-entrancy when we force re-expand after populating
-    private bool _reexpandGuard = false;
+    private bool reexpandGuard = false;
 
     // Call this for every node you create (drive/folder/file).
     private void HookNode(CrownTreeNode node)
@@ -259,21 +259,21 @@ namespace SwimEditor
 
             // After we swap in real children, some trees lose the expanded visual state.
             // Force it to remain expanded exactly once to avoid the “click twice” issue.
-            if (!_reexpandGuard)
+            if (!reexpandGuard)
             {
               try
               {
-                _reexpandGuard = true;
+                reexpandGuard = true;
                 n.Expanded = true;   // keep it open now that it has real kids
               }
               finally
               {
-                _reexpandGuard = false;
+                reexpandGuard = false;
               }
             }
 
             // Make sure it repaints with the new children immediately.
-            _tree.Invalidate();
+            tree.Invalidate();
           }
         }
       };
@@ -295,15 +295,15 @@ namespace SwimEditor
 
     private void BuildTreeForAllDrives()
     {
-      _tree.Nodes.Clear();
+      tree.Nodes.Clear();
 
       var root = new CrownTreeNode("This PC")
       {
         Tag = new NodeTag("", true),
-        Icon = (Bitmap)_smallImages.Images["COMPUTER"]
+        Icon = (Bitmap)smallImages.Images["COMPUTER"]
       };
       HookNode(root);
-      _tree.Nodes.Add(root);
+      tree.Nodes.Add(root);
 
       foreach (var di in DriveInfo.GetDrives())
       {
@@ -335,7 +335,7 @@ namespace SwimEditor
       var node = new CrownTreeNode(label)
       {
         Tag = new NodeTag(di.RootDirectory.FullName, isDir: true),
-        Icon = (Bitmap)_smallImages.Images["DRIVE"]
+        Icon = (Bitmap)smallImages.Images["DRIVE"]
       };
 
       HookNode(node);
@@ -350,7 +350,7 @@ namespace SwimEditor
       var node = new CrownTreeNode(name)
       {
         Tag = new NodeTag(path, isDir: true),
-        Icon = (Bitmap)_smallImages.Images["FOLDER"]
+        Icon = (Bitmap)smallImages.Images["FOLDER"]
       };
 
       HookNode(node);
@@ -364,7 +364,7 @@ namespace SwimEditor
       return new CrownTreeNode(name)
       {
         Tag = new NodeTag(path, isDir: false),
-        Icon = (Bitmap)_smallImages.Images[key]
+        Icon = (Bitmap)smallImages.Images[key]
       };
     }
 
@@ -446,7 +446,7 @@ namespace SwimEditor
     {
       if (string.IsNullOrWhiteSpace(path)) return;
 
-      var root = _tree.Nodes.FirstOrDefault(); // "This PC"
+      var root = tree.Nodes.FirstOrDefault(); // "This PC"
       if (root == null) return;
 
       // 1) Pick drive node
@@ -518,13 +518,13 @@ namespace SwimEditor
       if (node == null) return;
       try
       {
-        _suppressSelectionNavigate = true;
-        _tree.SelectNode(node);
-        _tree.EnsureVisible();
+        suppressSelectionNavigate = true;
+        tree.SelectNode(node);
+        tree.EnsureVisible();
       }
       finally
       {
-        _suppressSelectionNavigate = false;
+        suppressSelectionNavigate = false;
       }
     }
 
@@ -637,7 +637,7 @@ namespace SwimEditor
 
     private void SelectTreeNodeForPath(string path)
     {
-      if (_suppressTreeSync) return;
+      if (suppressTreeSync) return;
       EnsurePathVisible(path);
     }
 
@@ -648,12 +648,12 @@ namespace SwimEditor
     {
       if (!Directory.Exists(path)) return;
 
-      _list.BeginUpdate();
+      list.BeginUpdate();
       try
       {
-        _list.Items.Clear();
-        _list.Tag = path;
-        _pathBox.Text = path;
+        list.Items.Clear();
+        list.Tag = path;
+        pathBox.Text = path;
 
         IEnumerable<string> dirs = Array.Empty<string>();
         IEnumerable<string> files = Array.Empty<string>();
@@ -670,13 +670,13 @@ namespace SwimEditor
               Tag = dir,
               ImageKey = "FOLDER"
             };
-            if (_list.View == View.Details)
+            if (list.View == View.Details)
             {
               item.SubItems.Add("Folder");
               item.SubItems.Add("");
               item.SubItems.Add(GetWriteTime(dir));
             }
-            _list.Items.Add(item);
+            list.Items.Add(item);
           }
           catch { }
         }
@@ -692,34 +692,34 @@ namespace SwimEditor
               Tag = file,
               ImageKey = key
             };
-            if (_list.View == View.Details)
+            if (list.View == View.Details)
             {
               item.SubItems.Add(Path.GetExtension(file).ToUpperInvariant() + " File");
               item.SubItems.Add(GetFileSize(file));
               item.SubItems.Add(GetWriteTime(file));
             }
-            _list.Items.Add(item);
+            list.Items.Add(item);
           }
           catch { }
         }
       }
       finally
       {
-        _list.EndUpdate();
+        list.EndUpdate();
       }
 
       // keep tree selection synced and expanded along the path (guarded)
       try
       {
-        _suppressTreeSync = true;
+        suppressTreeSync = true;
         SelectTreeNodeForPath(path);
       }
       finally
       {
-        _suppressTreeSync = false;
+        suppressTreeSync = false;
       }
 
-      if (_list.View == View.LargeIcon)
+      if (list.View == View.LargeIcon)
         UpdateIconSpacingForCentering();
     }
 
@@ -727,7 +727,7 @@ namespace SwimEditor
     {
       var ext = Path.GetExtension(filePath).ToLowerInvariant();
       var key = filePath; // unique per file (cache)
-      if (_largeImages.Images.ContainsKey(key))
+      if (largeImages.Images.ContainsKey(key))
         return key;
 
       if (ImageExts.Contains(ext))
@@ -739,16 +739,16 @@ namespace SwimEditor
           {
             var thumb = CreateThumbnail(img, largeSize, largeSize);
             var small = new Bitmap(thumb, smallSize, smallSize);
-            _largeImages.Images.Add(key, thumb);
-            _smallImages.Images.Add(key, small);
+            largeImages.Images.Add(key, thumb);
+            smallImages.Images.Add(key, small);
             return key;
           }
         }
         catch { /* fall through to generic */ }
       }
 
-      _largeImages.Images.Add(key, _largeImages.Images["FILE"]);
-      _smallImages.Images.Add(key, _smallImages.Images["FILE"]);
+      largeImages.Images.Add(key, largeImages.Images["FILE"]);
+      smallImages.Images.Add(key, smallImages.Images["FILE"]);
       return key;
     }
 
@@ -886,8 +886,8 @@ namespace SwimEditor
     [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Auto)]
     private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
 
-    private const int LVM_FIRST = 0x1000;
-    private const int LVM_SETICONSPACING = LVM_FIRST + 53;
+    private const int LVMFIRST = 0x1000;
+    private const int LVMSETICONSPACING = LVMFIRST + 53;
 
     private static IntPtr PackToLParam(int x, int y)
     {
@@ -900,23 +900,23 @@ namespace SwimEditor
 
     private void UpdateIconSpacingForCentering()
     {
-      if (!IsHandleCreated || !_list.IsHandleCreated) return;
-      if (_list.View != View.LargeIcon) return;
+      if (!IsHandleCreated || !list.IsHandleCreated) return;
+      if (list.View != View.LargeIcon) return;
 
-      int imgW = _list.LargeImageList?.ImageSize.Width ?? largeSize;
-      int imgH = _list.LargeImageList?.ImageSize.Height ?? largeSize;
+      int imgW = list.LargeImageList?.ImageSize.Width ?? largeSize;
+      int imgH = list.LargeImageList?.ImageSize.Height ?? largeSize;
 
       int baseCellW = imgW + largeSize;              // ~= left/right padding + gap
       int baseCellH = imgH + (largeSize - 12);       // ~= caption + gap
 
-      int viewW = Math.Max(1, _list.ClientSize.Width);
+      int viewW = Math.Max(1, list.ClientSize.Width);
       int cols = Math.Max(1, viewW / baseCellW);
 
       if (cols <= 1)
       {
         int cx = Math.Min(viewW - (smallSize / 2), baseCellW);
         int cy = baseCellH;
-        SendMessage(_list.Handle, LVM_SETICONSPACING, IntPtr.Zero, PackToLParam(cx, cy));
+        SendMessage(list.Handle, LVMSETICONSPACING, IntPtr.Zero, PackToLParam(cx, cy));
         return;
       }
 
@@ -925,7 +925,7 @@ namespace SwimEditor
       int gap = leftover / (cols + 1);
       int cxFinal = baseCellW + gap;
 
-      SendMessage(_list.Handle, LVM_SETICONSPACING, IntPtr.Zero, PackToLParam(cxFinal, baseCellH));
+      SendMessage(list.Handle, LVMSETICONSPACING, IntPtr.Zero, PackToLParam(cxFinal, baseCellH));
     }
 
     /// <summary>
@@ -934,13 +934,13 @@ namespace SwimEditor
     /// </summary>
     private void ApplyInitialLeftWidth()
     {
-      if (!IsHandleCreated || _split == null) return;
+      if (!IsHandleCreated || split == null) return;
 
       // Compute desired distance based on the *current* size.
-      int total = Math.Max(1, _split.ClientSize.Width);
-      int min1 = Math.Max(0, _split.Panel1MinSize);
-      int min2 = Math.Max(0, _split.Panel2MinSize);
-      int splitterW = Math.Max(0, _split.SplitterWidth);
+      int total = Math.Max(1, split.ClientSize.Width);
+      int min1 = Math.Max(0, split.Panel1MinSize);
+      int min2 = Math.Max(0, split.Panel2MinSize);
+      int splitterW = Math.Max(0, split.SplitterWidth);
 
       int desired = Math.Max(LeftMinPixels, (int)Math.Round(total * LeftInitialPortion));
       int maxAllowed = Math.Max(min1, total - min2 - splitterW);
@@ -951,21 +951,21 @@ namespace SwimEditor
         desired = Clamp(desired, min1, maxAllowed);
 
       // Only attempt if it would actually change something.
-      if (desired >= min1 && desired <= maxAllowed && _split.SplitterDistance != desired)
+      if (desired >= min1 && desired <= maxAllowed && split.SplitterDistance != desired)
       {
         // Try once with the computed bounds; if layout shifted in-flight, recompute and try once more.
-        if (!TrySetSplitterDistance(_split, desired))
+        if (!TrySetSplitterDistance(split, desired))
         {
           // As a last resort, use Panel1's minimum; this is guaranteed valid.
           // If *that* fails, log it and bail.
-          if (!TrySetSplitterDistance(_split, _split.Panel1MinSize))
+          if (!TrySetSplitterDistance(split, split.Panel1MinSize))
           {
             Debug.WriteLine("ApplyInitialLeftWidth: Failed to set SplitterDistance even to Panel1MinSize.");
           }
         }
       }
 
-      _layoutInitialized = true;
+      layoutInitialized = true;
     }
 
     private static bool TrySetSplitterDistance(SplitContainer split, int requested)

@@ -142,6 +142,8 @@ namespace SwimEditor
       console.Show(dockPanel, DockState.DockBottom);
 
       console.AppendLog("Swim Engine Editor v1.0");
+      // Make it so game view cout stream callback logs to the console
+      gameView.EngineConsoleLine += line => console.AppendLog(line);
 
       hierarchy.OnSelectionChanged += obj => inspector.SetInspectedObject(obj);
 

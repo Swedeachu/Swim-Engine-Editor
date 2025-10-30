@@ -2,6 +2,7 @@
 using System.ComponentModel;
 using ReaLTaiizor.Controls;
 using ReaLTaiizor.Enum.Poison;
+using System.Text.RegularExpressions;
 
 namespace SwimEditor
 {
@@ -17,6 +18,14 @@ namespace SwimEditor
   /// </summary>
   public class ConsoleLogControl : UserControl
   {
+
+    private static readonly Dictionary<string, string> CommandAliases = new(StringComparer.OrdinalIgnoreCase)
+    {
+      ["cls"] = "clear",
+      ["print"] = "echo",
+    };
+
+    private static readonly Regex CommandRegex = new(@"^\s*(?<verb>\S+)(?:\s+(?<args>.*))?$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     [DllImport("user32.dll")] private static extern bool HideCaret(IntPtr hWnd);
     [DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
@@ -303,7 +312,6 @@ namespace SwimEditor
         string command = input.Text;
         if (!string.IsNullOrWhiteSpace(command))
         {
-          AppendLine("> " + command);
           history.Add(command);
           historyIndex = history.Count;
           CommandEntered?.Invoke(command);
@@ -348,14 +356,57 @@ namespace SwimEditor
       }
     }
 
+    private static bool TryParseCommand(string input, out string verb, out string args)
+    {
+      verb = string.Empty;
+      args = string.Empty;
+
+      if (string.IsNullOrWhiteSpace(input))
+      {
+        return false;
+      }
+
+      var m = CommandRegex.Match(input);
+      if (!m.Success)
+      {
+        return false;
+      }
+
+      verb = m.Groups["verb"].Value;
+      args = m.Groups["args"].Success ? m.Groups["args"].Value : string.Empty;
+
+      // Normalize aliases (e.g., "cls" => "clear", "print" => "echo")
+      if (CommandAliases.TryGetValue(verb, out var canonical))
+      {
+        verb = canonical;
+      }
+
+      return true;
+    }
+
     private void ParseEngineCommand(string command)
     {
-      if (command == null) return;
-
-      if (command == "cls" || command == "clear")
+      if (!TryParseCommand(command, out var verb, out var args))
       {
-        Clear();
         return;
+      }
+
+      switch (verb.ToLowerInvariant())
+      {
+        case "clear":
+          // ignore args for clear
+          Clear();
+          return;
+
+        case "echo":
+          // append only the payload
+          AppendLine("> " + args);
+          return;
+
+        default:
+          // Not a built-in: let the caller's pipeline (already invoked) handle it.
+          // Intentionally do nothing here.
+          return;
       }
     }
 

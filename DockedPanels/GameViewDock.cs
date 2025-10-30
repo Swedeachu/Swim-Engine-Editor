@@ -26,6 +26,13 @@ namespace SwimEditor
     private Process engineProcess;
     private IntPtr engineChildHwnd = IntPtr.Zero;
 
+    // Subscribe to receive each console line from the engine.
+    public event Action<string> EngineConsoleLine;
+
+    private DataReceivedEventHandler outputHandler;
+    private DataReceivedEventHandler errorHandler;
+    private Timer childPollTimer;
+
     // P/Invoke for focus and child enumeration
     private delegate bool EnumChildProc(IntPtr hWnd, IntPtr lParam);
 
@@ -82,27 +89,51 @@ namespace SwimEditor
         FileName = exePath,
         Arguments = $"--parent-hwnd {RenderHandle}",
         WorkingDirectory = exeDir,
-        UseShellExecute = false
+        UseShellExecute = false,
+        RedirectStandardOutput = true,
+        RedirectStandardError = true,
+        StandardOutputEncoding = Encoding.UTF8,
+        StandardErrorEncoding = Encoding.UTF8,
+        CreateNoWindow = true
       };
 
       try
       {
         engineProcess = Process.Start(psi);
+        engineProcess.EnableRaisingEvents = true;
+
+        // hook stdout/stderr to EngineConsoleLine (via RaiseEngineConsole)
+        outputHandler = (s, ea) =>
+        {
+          if (ea.Data != null) RaiseEngineConsole(ea.Data);
+        };
+        errorHandler = (s, ea) =>
+        {
+          if (ea.Data != null) RaiseEngineConsole("[err] " + ea.Data);
+        };
+
+        engineProcess.OutputDataReceived += outputHandler;
+        engineProcess.ErrorDataReceived += errorHandler;
+        engineProcess.BeginOutputReadLine();
+        engineProcess.BeginErrorReadLine();
 
         // Poll for the child window (created by the engine with class name "SwimEngine")
-        var t = new Timer { Interval = 50 };
+        childPollTimer?.Stop();
+        childPollTimer?.Dispose();
+        childPollTimer = new Timer { Interval = 50 };
+
         int tries = 0;
-        t.Tick += (s, e) =>
+        childPollTimer.Tick += (s, e) =>
         {
           tries++;
           CaptureEngineChildHandle();
           if (engineChildHwnd != IntPtr.Zero || tries > 120) // ~6s max
           {
-            ((Timer)s).Stop();
+            childPollTimer.Stop();
             AfterChildDiscovered();
           }
         };
-        t.Start();
+        childPollTimer.Start();
       }
       catch (Exception ex)
       {
@@ -151,16 +182,37 @@ namespace SwimEditor
     {
       try
       {
-        if (engineProcess != null && !engineProcess.HasExited)
+        // stop & dispose polling timer
+        if (childPollTimer != null)
         {
-          // Closing this dock should destroy the child window inside it.
-          // Also request close as a safeguard.
-          engineProcess.CloseMainWindow();
-          engineProcess.WaitForExit(500);
+          childPollTimer.Stop();
+          childPollTimer.Dispose();
+          childPollTimer = null;
+        }
+
+        if (engineProcess != null)
+        {
+          // unhook stdout/stderr first to avoid callbacks during teardown
+          if (outputHandler != null) engineProcess.OutputDataReceived -= outputHandler;
+          if (errorHandler != null) engineProcess.ErrorDataReceived -= errorHandler;
+
+          try
+          {
+            engineProcess.CancelOutputRead();
+            engineProcess.CancelErrorRead();
+          }
+          catch { /* ignore if already cancelled/not started */ }
 
           if (!engineProcess.HasExited)
           {
-            engineProcess.Kill();
+            engineProcess.CloseMainWindow();
+            engineProcess.WaitForExit(500);
+
+            if (!engineProcess.HasExited)
+            {
+              engineProcess.Kill();
+              engineProcess.WaitForExit(500);
+            }
           }
         }
       }
@@ -170,10 +222,27 @@ namespace SwimEditor
       }
       finally
       {
+        outputHandler = null;
+        errorHandler = null;
+
         engineProcess?.Dispose();
         engineProcess = null;
         engineChildHwnd = IntPtr.Zero;
       }
+    }
+
+    // marshal to UI thread and raise the event
+    private void RaiseEngineConsole(string line)
+    {
+      if (string.IsNullOrEmpty(line)) return;
+
+      if (InvokeRequired)
+      {
+        BeginInvoke(new Action<string>(RaiseEngineConsole), line);
+        return;
+      }
+
+      EngineConsoleLine?.Invoke(line);
     }
 
     private class DoubleBufferedPanel : Panel
