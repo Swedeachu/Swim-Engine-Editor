@@ -249,9 +249,15 @@ namespace SwimEditor
       if (gameView == null || !gameView.IsEngineRunning) return;
 
       if (!gameView.IsEnginePaused)
+      {
         gameView.PauseEngine();
+        pauseButton.Text = "Resume";
+      }
       else
+      {
         gameView.ResumeEngine();
+        pauseButton.Text = "Pause";
+      }
 
       UpdateTransportUi();
     }
@@ -269,6 +275,7 @@ namespace SwimEditor
       if (gameView == null)
       {
         SetBtnState(active: false, play: true, pause: false, stop: false);
+        pauseButton.Text = "Pause";
         return;
       }
 
@@ -279,6 +286,9 @@ namespace SwimEditor
       playButton.Enabled = !running || paused; // can play if not running or paused
       pauseButton.Enabled = running;            // only when running
       stopButton.Enabled = running;            // only when running
+
+      // Label the pause button based on state
+      pauseButton.Text = paused ? "Resume" : "Pause";
 
       // Visual state (simple color UX)
       SetActive(playButton, running && !paused);

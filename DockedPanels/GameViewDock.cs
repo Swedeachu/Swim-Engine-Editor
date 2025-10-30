@@ -44,7 +44,7 @@ namespace SwimEditor
 
     [DllImport("ntdll.dll")] private static extern int NtSuspendProcess(IntPtr processHandle);
     [DllImport("ntdll.dll")] private static extern int NtResumeProcess(IntPtr processHandle);
-
+    [DllImport("user32.dll")] private static extern bool EnableWindow(IntPtr hWnd, bool bEnable);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct THREADENTRY32
@@ -113,7 +113,7 @@ namespace SwimEditor
       // keep the child filling the panel (important for hit-testing)
       renderSurface.Resize += (_, __) =>
       {
-        if (engineChildHwnd != IntPtr.Zero)
+        if (engineChildHwnd != IntPtr.Zero && !IsEnginePaused)
         {
           MoveWindow(engineChildHwnd, 0, 0, renderSurface.ClientSize.Width, renderSurface.ClientSize.Height, false);
         }
@@ -181,14 +181,19 @@ namespace SwimEditor
 
       try
       {
-        // Suspend only the child process; editor stays responsive.
+        // Important: disable the child HWND first so Windows won't hit-test it while suspended
+        if (engineChildHwnd != IntPtr.Zero) EnableWindow(engineChildHwnd, false);
+
+        // Suspend only the child process; editor stays responsive
         NtSuspendProcess(engineProcess.Handle);
+
         IsEnginePaused = true;
         RaiseEngineStateChanged();
       }
       catch
       {
-        // ignore failures; keep state consistent
+        // If something failed, try to re-enable just in case
+        if (engineChildHwnd != IntPtr.Zero) EnableWindow(engineChildHwnd, true);
         IsEnginePaused = false;
         RaiseEngineStateChanged();
       }
@@ -200,13 +205,18 @@ namespace SwimEditor
 
       try
       {
+        // Resume the process first
         NtResumeProcess(engineProcess.Handle);
+
+        // Then re-enable the child HWND (now safe to receive input again)
+        if (engineChildHwnd != IntPtr.Zero) EnableWindow(engineChildHwnd, true);
+
         IsEnginePaused = false;
         RaiseEngineStateChanged();
       }
       catch
       {
-        // ignore
+        // ignore; keep UI responsive
       }
     }
 
@@ -602,8 +612,17 @@ namespace SwimEditor
         const int WM_SYSKEYDOWN = 0x0104;
         const int WM_SYSKEYUP = 0x0105;
 
+        bool paused = isPausedProvider != null && isPausedProvider();
+
         if (m.Msg == WM_MOUSEACTIVATE)
         {
+          if (paused)
+          {
+            // Don't activate/steal focus toward the suspended child
+            m.Result = (IntPtr)MA_ACTIVATE; // activate host so keyboard stays here
+            return;
+          }
+
           m.Result = (IntPtr)MA_ACTIVATE;
           if (childHwnd != IntPtr.Zero)
           {
@@ -612,30 +631,16 @@ namespace SwimEditor
           return;
         }
 
-        // Forward input messages to child window
-        if (childHwnd != IntPtr.Zero)
+        // Forward input messages to child window (only when not paused)
+        if (!paused && childHwnd != IntPtr.Zero)
         {
           if ((m.Msg >= WM_MOUSEMOVE && m.Msg <= WM_MOUSEWHEEL) || (m.Msg >= WM_KEYDOWN && m.Msg <= WM_SYSKEYUP))
           {
-            bool paused = isPausedProvider != null && isPausedProvider();
-
-            // When paused: PostMessage so we don't block the editor UI on a suspended engine.
-            // When running: SendMessage is fine (synchronous hit testing, etc.).
-            if (paused)
+            // Keep this synchronous when running for accurate behavior
+            SendMessage(childHwnd, (uint)m.Msg, m.WParam, m.LParam);
+            if (m.Msg >= WM_KEYDOWN && m.Msg <= WM_SYSKEYUP)
             {
-              PostMessage(childHwnd, (uint)m.Msg, m.WParam, m.LParam);
-              if (m.Msg >= WM_KEYDOWN && m.Msg <= WM_SYSKEYUP)
-              {
-                return; // Don't pass keyboard to base
-              }
-            }
-            else
-            {
-              SendMessage(childHwnd, (uint)m.Msg, m.WParam, m.LParam);
-              if (m.Msg >= WM_KEYDOWN && m.Msg <= WM_SYSKEYUP)
-              {
-                return; // Don't pass keyboard to base
-              }
+              return; // Don't pass keyboard to base
             }
           }
         }
