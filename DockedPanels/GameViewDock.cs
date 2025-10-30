@@ -1,6 +1,9 @@
-﻿using System.Diagnostics;
+﻿using System;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Windows.Forms;
+using System.Drawing;
 using WeifenLuo.WinFormsUI.Docking;
 using Timer = System.Windows.Forms.Timer;
 
@@ -15,6 +18,27 @@ namespace SwimEditor
     [DllImport("user32.dll")] private static extern bool MoveWindow(IntPtr hWnd, int X, int Y, int nWidth, int nHeight, bool bRepaint);
     [DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
     [DllImport("user32.dll")] private static extern IntPtr SetFocus(IntPtr hWnd);
+    [DllImport("user32.dll")] private static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);
+    [DllImport("user32.dll")] private static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam, uint fuFlags, uint uTimeout, out IntPtr lpdwResult);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool EnumChildWindows(IntPtr hWndParent, EnumChildProc lpEnumFunc, IntPtr lParam);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool PostThreadMessage(uint idThread, uint Msg, IntPtr wParam, IntPtr lParam);
+
+    private const uint WM_CLOSE = 0x0010;
+    private const uint WM_QUIT = 0x0012;
+    private const uint SMTO_ABORTIFHUNG = 0x0002;
 
     private static readonly IntPtr HWND_TOP = IntPtr.Zero;
     private const uint SWP_NOZORDER = 0x0004;
@@ -33,14 +57,13 @@ namespace SwimEditor
     private DataReceivedEventHandler errorHandler;
     private Timer childPollTimer;
 
+    private NativeWindow parkingWindow; // hidden top-level to "park" the child during handle recreation
+    private IntPtr parkingHwnd = IntPtr.Zero;
+
+    private bool shuttingDown = false;
+
     // P/Invoke for focus and child enumeration
     private delegate bool EnumChildProc(IntPtr hWnd, IntPtr lParam);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern bool EnumChildWindows(IntPtr hWndParent, EnumChildProc lpEnumFunc, IntPtr lParam);
-
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    private static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
 
     public GameViewDock()
     {
@@ -62,8 +85,81 @@ namespace SwimEditor
         }
       };
 
+      // park/unpark across handle/parent changes
+      renderSurface.HandleDestroyed += RenderSurfaceHandleDestroyed;
+      renderSurface.HandleCreated += RenderSurfaceHandleCreated;
+      renderSurface.ParentChanged += RenderSurfaceParentChanged;
+      EnsureParkingWindow();
+
       Shown += (_, __) => StartEngineIfNeeded();
+      FormClosing += OnGameViewDockClosing;
       FormClosed += (_, __) => StopEngineIfNeeded();
+    }
+
+    // Tiny hidden window we can parent the child to while the panel handle is being recreated
+    private void EnsureParkingWindow()
+    {
+      if (parkingWindow != null && parkingHwnd != IntPtr.Zero) return;
+
+      parkingWindow = new NativeWindow();
+      var cp = new CreateParams
+      {
+        Caption = "SwimParking",
+        X = -10000,
+        Y = -10000,
+        Width = 1,
+        Height = 1,
+        Style = unchecked((int)0x80000000) // WS_POPUP
+      };
+      parkingWindow.CreateHandle(cp);
+      parkingHwnd = parkingWindow.Handle;
+    }
+
+    // Before the panel's handle is destroyed (e.g., undock/float), reparent the engine child to the parking HWND
+    private void RenderSurfaceHandleDestroyed(object sender, EventArgs e)
+    {
+      // If we are genuinely closing, do NOT park; let the child be destroyed.
+      if (shuttingDown) return;
+
+      // If our child exists, park it so it doesn't get destroyed with the panel
+      if (engineChildHwnd != IntPtr.Zero && parkingHwnd != IntPtr.Zero)
+      {
+        SetParent(engineChildHwnd, parkingHwnd);
+      }
+    }
+
+    // After the panel's handle is recreated, reparent the engine child back and resize it
+    private void RenderSurfaceHandleCreated(object sender, EventArgs e)
+    {
+      if (engineChildHwnd != IntPtr.Zero)
+      {
+        SetParent(engineChildHwnd, renderSurface.Handle);
+        MoveWindow(engineChildHwnd, 0, 0, renderSurface.ClientSize.Width, renderSurface.ClientSize.Height, false);
+        BringWindowToTop(engineChildHwnd);
+        SetFocus(engineChildHwnd);
+      }
+    }
+
+    private void RenderSurfaceParentChanged(object sender, EventArgs e)
+    {
+      // If we are genuinely closing, do NOT park/unpark
+      if (shuttingDown) return;
+
+      // If being detached from a parent temporarily, park the child.
+      if (engineChildHwnd == IntPtr.Zero || parkingHwnd == IntPtr.Zero) return;
+
+      var parent = renderSurface.Parent;
+      if (parent == null)
+      {
+        // moving between containers; keep child alive
+        SetParent(engineChildHwnd, parkingHwnd);
+      }
+      else if (renderSurface.IsHandleCreated)
+      {
+        // back under a container; restore parenting
+        SetParent(engineChildHwnd, renderSurface.Handle);
+        MoveWindow(engineChildHwnd, 0, 0, renderSurface.ClientSize.Width, renderSurface.ClientSize.Height, false);
+      }
     }
 
     public IntPtr RenderHandle => renderSurface.Handle;
@@ -178,6 +274,44 @@ namespace SwimEditor
       SetFocus(engineChildHwnd);
     }
 
+    private void RequestEngineClose()
+    {
+      if (engineChildHwnd != IntPtr.Zero)
+      {
+        // Get the engine UI thread and post WM_QUIT so its PeekMessage loop exits cleanly
+        uint pid;
+        uint tid = GetWindowThreadProcessId(engineChildHwnd, out pid);
+        if (tid != 0)
+        {
+          // Post WM_QUIT (no wParam/lParam needed). This does not require the HWND.
+          PostThreadMessage(tid, WM_QUIT, IntPtr.Zero, IntPtr.Zero);
+        }
+
+        // As a best-effort nudge, also send/ post WM_CLOSE (child may ignore, but harmless)
+        IntPtr result;
+        SendMessageTimeout(engineChildHwnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero, SMTO_ABORTIFHUNG, 200, out result);
+        PostMessage(engineChildHwnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+      }
+      else if (engineProcess != null && !engineProcess.HasExited)
+      {
+        // No child HWND; let StopEngineIfNeeded handle fallback kill if needed.
+      }
+    }
+
+    private void OnGameViewDockClosing(object sender, FormClosingEventArgs e)
+    {
+      shuttingDown = true; // prevents parking during real close
+
+      // Ask the engine to shut down (thread-quit + best-effort WM_CLOSE)
+      RequestEngineClose();
+
+      // Give it a brief moment to exit cleanly
+      if (engineProcess != null && !engineProcess.HasExited)
+      {
+        try { engineProcess.WaitForExit(800); } catch { }
+      }
+    }
+
     private void StopEngineIfNeeded()
     {
       try
@@ -196,22 +330,18 @@ namespace SwimEditor
           if (outputHandler != null) engineProcess.OutputDataReceived -= outputHandler;
           if (errorHandler != null) engineProcess.ErrorDataReceived -= errorHandler;
 
-          try
-          {
-            engineProcess.CancelOutputRead();
-            engineProcess.CancelErrorRead();
-          }
-          catch { /* ignore if already cancelled/not started */ }
+          try { engineProcess.CancelOutputRead(); } catch { /* ignore */ }
+          try { engineProcess.CancelErrorRead(); } catch { /* ignore */ }
 
           if (!engineProcess.HasExited)
           {
-            engineProcess.CloseMainWindow();
-            engineProcess.WaitForExit(500);
+            // We already requested quit; give it one more short chance before kill
+            try { engineProcess.WaitForExit(700); } catch { }
 
             if (!engineProcess.HasExited)
             {
               engineProcess.Kill();
-              engineProcess.WaitForExit(500);
+              try { engineProcess.WaitForExit(700); } catch { }
             }
           }
         }
