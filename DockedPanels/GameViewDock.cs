@@ -4,6 +4,7 @@ using System.Text;
 using WeifenLuo.WinFormsUI.Docking;
 using Timer = System.Windows.Forms.Timer;
 using System.ComponentModel;
+using System.Drawing;
 
 namespace SwimEditor
 {
@@ -46,6 +47,9 @@ namespace SwimEditor
     [DllImport("ntdll.dll")] private static extern int NtResumeProcess(IntPtr processHandle);
     [DllImport("user32.dll")] private static extern bool EnableWindow(IntPtr hWnd, bool bEnable);
 
+    // Overload for process communication via WM_COPYDATA
+    [DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wParam, ref COPYDATASTRUCT lParam);
+
     [StructLayout(LayoutKind.Sequential)]
     private struct THREADENTRY32
     {
@@ -71,15 +75,28 @@ namespace SwimEditor
     private const uint SWP_NOSIZE = 0x0001;
     private const uint SWP_NOMOVE = 0x0002;
 
+    private const uint WM_COPYDATA = 0x004A;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct COPYDATASTRUCT
+    {
+      public IntPtr dwData;   // optional channel/tag
+      public int cbData;      // size in bytes
+      public IntPtr lpData;   // pointer to data
+    }
+
     private Panel renderSurface;
     private Process engineProcess;
     private IntPtr engineChildHwnd = IntPtr.Zero;
 
-    // Subscribe to receive each console line from the engine.
+    // Subscribe to receive each console line from the engine
     public event Action<string> EngineConsoleLine;
 
     // Notify editor to refresh transport UI when engine state changes
     public event Action EngineStateChanged;
+
+    // Queue to hold messages until engineChildHwnd is ready
+    private readonly Queue<string> pendingEngineMessages = new Queue<string>();
 
     private DataReceivedEventHandler outputHandler;
     private DataReceivedEventHandler errorHandler;
@@ -147,7 +164,7 @@ namespace SwimEditor
       {
         ResumeEngine();
       }
-      // else already running → do nothing (safety)
+      // else already running: do nothing (safety)
     }
 
     public void StopEngine()
@@ -217,6 +234,85 @@ namespace SwimEditor
       catch
       {
         // ignore; keep UI responsive
+      }
+    }
+
+    // Variadic-style message sender.
+    // Formats the message and sends via WM_COPYDATA as UTF-16 (wide) with a NUL terminator.
+    public void SendEngineMessage(string message, params object[] args)
+    {
+      if (string.IsNullOrEmpty(message)) return;
+
+      string payload = (args != null && args.Length > 0)
+        ? string.Format(System.Globalization.CultureInfo.InvariantCulture, message, args)
+        : message;
+
+      // If the child HWND isn't ready yet, queue it.
+      if (engineChildHwnd == IntPtr.Zero)
+      {
+        pendingEngineMessages.Enqueue(payload);
+        return;
+      }
+
+      // Try immediate send; if it fails (rare), re-queue once.
+      if (!SendCopyDataString(payload))
+      {
+        pendingEngineMessages.Enqueue(payload);
+      }
+    }
+
+    // Try to flush any queued messages when the child HWND is available.
+    private void TryFlushPendingMessages()
+    {
+      if (engineChildHwnd == IntPtr.Zero) return;
+
+      int safety = 256; // avoid infinite loops
+      while (pendingEngineMessages.Count > 0 && safety-- > 0)
+      {
+        var s = pendingEngineMessages.Peek();
+        if (SendCopyDataString(s))
+        {
+          pendingEngineMessages.Dequeue();
+        }
+        else
+        {
+          // Child not accepting right now; stop trying for this tick.
+          break;
+        }
+      }
+    }
+
+    // Core WM_COPYDATA send (UTF-16, NUL-terminated)
+    private bool SendCopyDataString(string s, ulong channel = 1)
+    {
+      if (engineChildHwnd == IntPtr.Zero) return false;
+
+      // Marshal as UTF-16 with explicit NUL terminator
+      IntPtr strPtr = IntPtr.Zero;
+      try
+      {
+        // Include trailing NUL; StringToHGlobalUni already includes it.
+        strPtr = Marshal.StringToHGlobalUni(s);
+        int byteCount = (s.Length + 1) * 2; // UTF-16 bytes, including NUL
+
+        var cds = new COPYDATASTRUCT
+        {
+          dwData = (IntPtr)unchecked((long)channel),
+          cbData = byteCount,
+          lpData = strPtr
+        };
+
+        // SendMessage (synchronous)
+        SendMessage(engineChildHwnd, WM_COPYDATA, IntPtr.Zero, ref cds);
+        return true;
+      }
+      catch
+      {
+        return false;
+      }
+      finally
+      {
+        if (strPtr != IntPtr.Zero) Marshal.FreeHGlobal(strPtr);
       }
     }
 
@@ -460,10 +556,19 @@ namespace SwimEditor
       if (renderSurface is DoubleBufferedPanel panel)
       {
         panel.SetChildWindow(engineChildHwnd);
-        panel.SetPausedProvider(() => IsEnginePaused); // NEW: let panel know when paused
+        panel.SetPausedProvider(() => IsEnginePaused); // Let panel know when paused
+
+        // subscribe once
+        panel.EngineMessageReceived -= OnEngineMessageReceived; // avoid dupes
+        panel.EngineMessageReceived += OnEngineMessageReceived;
       }
 
       SetFocus(engineChildHwnd);
+
+      SendEngineMessage("Attatching IPC to Engine from Editor");
+
+      // flush any queued IPC
+      TryFlushPendingMessages();
     }
 
     private void RequestEngineClose()
@@ -544,6 +649,8 @@ namespace SwimEditor
       }
       finally
       {
+        pendingEngineMessages.Clear();
+
         outputHandler = null;
         errorHandler = null;
 
@@ -574,11 +681,21 @@ namespace SwimEditor
       try { EngineStateChanged?.Invoke(); } catch { }
     }
 
+    private void OnEngineMessageReceived(ulong channel, string text)
+    {
+      EngineConsoleLine?.Invoke($"[Message from Engine to Editor: {channel}] {text}");
+
+      // This should be parsed elsewhere in MainWindowForm to be able to talk to the other panels such as the hierarchy 
+    }
+
     private class DoubleBufferedPanel : Panel
     {
       private IntPtr childHwnd = IntPtr.Zero;
 
       private Func<bool> isPausedProvider;
+
+      // Subscribe to when the engine talks to us
+      public event Action<ulong, string> EngineMessageReceived; // channel, text
 
       public void SetPausedProvider(Func<bool> provider)
       {
@@ -611,6 +728,36 @@ namespace SwimEditor
         const int WM_CHAR = 0x0102;
         const int WM_SYSKEYDOWN = 0x0104;
         const int WM_SYSKEYUP = 0x0105;
+
+        if (m.Msg == WM_COPYDATA)
+        {
+          try
+          {
+            var cds = Marshal.PtrToStructure<COPYDATASTRUCT>(m.LParam);
+            ulong channel = (ulong)(long)cds.dwData;
+
+            string? text = null;
+            if (cds.lpData != IntPtr.Zero && cds.cbData >= 2)
+            {
+              // data is UTF-16 including trailing NUL; PtrToStringUni will stop at NUL.
+              text = Marshal.PtrToStringUni(cds.lpData, cds.cbData / 2);
+              if (text != null && text.Length > 0 && text[^1] == '\0')
+                text = text[..^1];
+            }
+
+            EngineMessageReceived?.Invoke(channel, text ?? string.Empty);
+
+            // Return nonzero to indicate handled
+            m.Result = (IntPtr)1;
+            return;
+          }
+          catch
+          {
+            // Consider returning 0 to indicate not handled if something goes wrong.
+            m.Result = IntPtr.Zero;
+            return;
+          }
+        }
 
         bool paused = isPausedProvider != null && isPausedProvider();
 
@@ -653,7 +800,8 @@ namespace SwimEditor
         DoubleBuffered = true;
         TabStop = true; // Allow this panel to receive focus
       }
-    }
+
+    } // class DoubleBufferedPanel
 
   } // class GameViewDeck
 
