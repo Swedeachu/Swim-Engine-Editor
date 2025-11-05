@@ -207,11 +207,25 @@ namespace SwimEditor
         Height = 32
       };
 
-      var upBtn = new ToolStripButton("Up")
+      var upBtn = new System.Windows.Forms.Button
       {
-        DisplayStyle = ToolStripItemDisplayStyle.Text,
-        AutoSize = true
+        Text = "Up Directory",
+        AutoSize = true,
+        AutoSizeMode = AutoSizeMode.GrowAndShrink,
+        Padding = new Padding(2, 2, 2, 2),
+
+        // flat + themed to avoid white outline
+        FlatStyle = FlatStyle.Flat,
+        TabStop = false,
+        UseVisualStyleBackColor = false,
+        BackColor = SwimEditorTheme.PageBg,
+        ForeColor = SwimEditorTheme.Text
       };
+      upBtn.FlatAppearance.BorderSize = 0;
+      upBtn.FlatAppearance.BorderColor = SwimEditorTheme.PageBg;
+      upBtn.FlatAppearance.MouseOverBackColor = SwimEditorTheme.HoverColor;
+      upBtn.FlatAppearance.MouseDownBackColor = SwimEditorTheme.HoverColor;
+
       upBtn.Click += (s, e) =>
       {
         try
@@ -223,35 +237,11 @@ namespace SwimEditor
         }
         catch { }
       };
-
-      var viewBtn = new ToolStripDropDownButton("View")
+      var upHost = new ToolStripControlHost(upBtn)
       {
-        AutoSize = true
+        AutoSize = true,
+        Margin = new Padding(8, 0, 0, 0)
       };
-      var large = new ToolStripMenuItem("Large Icons") { Checked = true };
-      var details = new ToolStripMenuItem("Details");
-
-      large.Click += (s, e) =>
-      {
-        large.Checked = true; details.Checked = false;
-        list.View = View.LargeIcon;
-        UpdateIconSpacingForCentering();
-      };
-
-      details.Click += (s, e) =>
-      {
-        large.Checked = false; details.Checked = true;
-        list.View = View.Details;
-        if (list.Columns.Count == 0)
-        {
-          list.Columns.Add("Name", 300);
-          list.Columns.Add("Type", 120);
-          list.Columns.Add("Size", 100, HorizontalAlignment.Right);
-          list.Columns.Add("Modified", 160);
-        }
-      };
-      viewBtn.DropDownItems.Add(large);
-      viewBtn.DropDownItems.Add(details);
 
       // Place after View; host real Buttons to avoid ToolStrip 23px sizing quirks
       var openBtn = new System.Windows.Forms.Button
@@ -330,8 +320,7 @@ namespace SwimEditor
         Margin = new Padding(8, 0, 0, 0)
       };
 
-      tool.Items.Add(upBtn);
-      tool.Items.Add(viewBtn);
+      tool.Items.Add(upHost);
       tool.Items.Add(openHost);
       tool.Items.Add(returnHost);
 
