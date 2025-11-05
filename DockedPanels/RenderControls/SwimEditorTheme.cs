@@ -19,6 +19,7 @@
     public static readonly Color Text = Color.Gainsboro;              // light grey text
     public static readonly Color Line = Color.FromArgb(62, 62, 66);   // divider lines
     public static readonly Color Accent = Color.FromArgb(0, 122, 204);  // Unity-ish blue accent
+    public static readonly Color HoverColor = Color.FromArgb(92, 92, 92); // Light gray
   }
 
 }

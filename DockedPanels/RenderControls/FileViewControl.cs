@@ -1,14 +1,63 @@
 ﻿using ReaLTaiizor.Controls;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 
 namespace SwimEditor
 {
+
+  internal static class ShellNative
+  {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct SHChangeNotifyEntry
+    {
+      public IntPtr pidl;
+      [MarshalAs(UnmanagedType.Bool)]
+      public bool fRecursive;
+    }
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern uint RegisterWindowMessage(string lpString);
+
+    [DllImport("shell32.dll")]
+    public static extern IntPtr SHChangeNotifyRegister(
+        IntPtr hwnd,
+        int fSources,
+        int fEvents,
+        uint wMsg,
+        int cEntries,
+        [In] SHChangeNotifyEntry[] entries);
+
+    [DllImport("shell32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool SHChangeNotifyDeregister(IntPtr hNotify);
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    public static extern int SHParseDisplayName(
+        string pszName,
+        IntPtr pbc,
+        out IntPtr ppidl,
+        uint sfgaoIn,
+        out uint psfgaoOut);
+
+    [DllImport("ole32.dll")]
+    public static extern void CoTaskMemFree(IntPtr pv);
+
+    // fSources
+    public const int SHCNRF_ShellLevel = 0x0002;
+    public const int SHCNRF_InterruptLevel = 0x0001;
+    public const int SHCNRF_NewDelivery = 0x8000;
+
+    // fEvents
+    public const int SHCNE_ALLEVENTS = 0x7FFFFFFF;
+  }
 
   /// <summary>
   /// Explorer-like browser using CrownTreeView (left) + ListView (right).
   /// - Left shows all drives; expanding loads children on demand (skips symlinks/reparse)
   /// - Right shows current folder; double-click to enter / open
   /// - Selection stays in sync both ways with re-entrancy guards (no stack overflow)
+  /// - Watches the active right-pane directory via SHChangeNotifyRegister and refreshes on shell message
+  /// - Also refreshes the matching node in the left tree so directories stay visually in sync, preserving expansion and selection
   /// </summary>
   public class FileViewControl : UserControl
   {
@@ -48,6 +97,14 @@ namespace SwimEditor
     // Re-entrancy guards
     private bool suppressSelectionNavigate = false; // tree selection -> NavigateTo
     private bool suppressTreeSync = false;          // NavigateTo -> SelectTreeNodeForPath
+
+    // Prevent re-entrancy when we force re-expand after populating
+    private bool reexpandGuard = false;
+
+    // --- Shell notify (message-only; no threads/timers) ---
+    private IntPtr shNotifyHandle = IntPtr.Zero;
+    private uint shNotifyMsg;
+    private IntPtr currentPidl = IntPtr.Zero;
 
     public FileViewControl()
     {
@@ -134,13 +191,27 @@ namespace SwimEditor
         }
       };
 
+      // Toolbar
       tool = new CrownToolStrip
       {
         GripStyle = ToolStripGripStyle.Hidden,
-        BackColor = SwimEditorTheme.PageBg
+        BackColor = SwimEditorTheme.PageBg,
+
+        // Important: stop 23x23 autosize and allow a taller row
+        AutoSize = false,
+        Stretch = true,
+        Dock = DockStyle.Top,
+        Padding = new Padding(4, 2, 4, 2),
+        ImageScalingSize = new Size(20, 20),
+        CanOverflow = false,
+        Height = 32
       };
 
-      var upBtn = new ToolStripButton("Up");
+      var upBtn = new ToolStripButton("Up")
+      {
+        DisplayStyle = ToolStripItemDisplayStyle.Text,
+        AutoSize = true
+      };
       upBtn.Click += (s, e) =>
       {
         try
@@ -153,7 +224,10 @@ namespace SwimEditor
         catch { }
       };
 
-      var viewBtn = new ToolStripDropDownButton("View");
+      var viewBtn = new ToolStripDropDownButton("View")
+      {
+        AutoSize = true
+      };
       var large = new ToolStripMenuItem("Large Icons") { Checked = true };
       var details = new ToolStripMenuItem("Details");
 
@@ -176,15 +250,92 @@ namespace SwimEditor
           list.Columns.Add("Modified", 160);
         }
       };
-
-      tool.Items.Add(upBtn);
-      tool.Items.Add(viewBtn);
       viewBtn.DropDownItems.Add(large);
       viewBtn.DropDownItems.Add(details);
 
-      // TODO: have this as false, so on typing into this if the path is valid to a directory, it goes there.
-      //       On focus leave of typing, if not a valid dir, then just change back to the last valid dir.
-      // Which brings another TODO to note: file search bar, searches starting from active directory and its sub directories.
+      // Place after View; host real Buttons to avoid ToolStrip 23px sizing quirks
+      var openBtn = new System.Windows.Forms.Button
+      {
+        Text = "Open in Explorer",
+        AutoSize = true,
+        AutoSizeMode = AutoSizeMode.GrowAndShrink,
+        Padding = new Padding(2, 2, 2, 2),
+
+        // flat + themed to avoid white outline
+        FlatStyle = FlatStyle.Flat,
+        TabStop = false,
+        UseVisualStyleBackColor = false,
+        BackColor = SwimEditorTheme.PageBg,
+        ForeColor = SwimEditorTheme.Text
+      };
+      openBtn.FlatAppearance.BorderSize = 0;
+      openBtn.FlatAppearance.BorderColor = SwimEditorTheme.PageBg;
+      openBtn.FlatAppearance.MouseOverBackColor = SwimEditorTheme.HoverColor;
+      openBtn.FlatAppearance.MouseDownBackColor = SwimEditorTheme.HoverColor;
+
+      openBtn.Click += (s, e) =>
+      {
+        try
+        {
+          var current = list.Tag as string ?? rootPath;
+          if (string.IsNullOrEmpty(current) || !Directory.Exists(current)) return;
+
+          System.Diagnostics.Process.Start(new ProcessStartInfo
+          {
+            FileName = "explorer.exe",
+            Arguments = $"\"{current}\"",
+            UseShellExecute = true
+          });
+        }
+        catch { }
+      };
+      var openHost = new ToolStripControlHost(openBtn)
+      {
+        AutoSize = true,
+        Margin = new Padding(8, 0, 0, 0)
+      };
+
+      // Return to Project (go back to the binary's main folder)
+      var returnBtn = new System.Windows.Forms.Button
+      {
+        Text = "Return to Project",
+        AutoSize = true,
+        AutoSizeMode = AutoSizeMode.GrowAndShrink,
+        Padding = new Padding(2, 2, 2, 2),
+
+        FlatStyle = FlatStyle.Flat,
+        TabStop = false,
+        UseVisualStyleBackColor = false,
+        BackColor = SwimEditorTheme.PageBg,
+        ForeColor = SwimEditorTheme.Text
+      };
+      returnBtn.FlatAppearance.BorderSize = 0;
+      returnBtn.FlatAppearance.BorderColor = SwimEditorTheme.PageBg;
+      returnBtn.FlatAppearance.MouseOverBackColor = SwimEditorTheme.HoverColor;
+      returnBtn.FlatAppearance.MouseDownBackColor = SwimEditorTheme.HoverColor;
+
+      returnBtn.Click += (s, e) =>
+      {
+        try
+        {
+          var project = AppDomain.CurrentDomain.BaseDirectory;
+          if (!string.IsNullOrEmpty(project) && Directory.Exists(project))
+            NavigateTo(project);
+        }
+        catch { }
+      };
+      var returnHost = new ToolStripControlHost(returnBtn)
+      {
+        AutoSize = true,
+        Margin = new Padding(8, 0, 0, 0)
+      };
+
+      tool.Items.Add(upBtn);
+      tool.Items.Add(viewBtn);
+      tool.Items.Add(openHost);
+      tool.Items.Add(returnHost);
+
+      // Path box
       pathBox = new CrownTextBox
       {
         Dock = DockStyle.Top,
@@ -219,6 +370,9 @@ namespace SwimEditor
       Resize += (s, e) => { if (!userAdjustedSplitter) ApplyInitialLeftWidth(); };
       split.SplitterMoved += (s, e) => { if (layoutInitialized) userAdjustedSplitter = true; };
 
+      // Unique message for this control to receive shell change notifications
+      shNotifyMsg = ShellNative.RegisterWindowMessage("SWIMEDITOR_SHNOTIFY_" + Guid.NewGuid().ToString("N"));
+
       // Default starting focus = running binary directory
       SetRoot(AppDomain.CurrentDomain.BaseDirectory);
     }
@@ -240,9 +394,6 @@ namespace SwimEditor
         NavigateTo(target);          // list refresh + guarded tree sync
       }
     }
-
-    // Prevent re-entrancy when we force re-expand after populating
-    private bool reexpandGuard = false;
 
     // Call this for every node you create (drive/folder/file).
     private void HookNode(CrownTreeNode node)
@@ -720,6 +871,9 @@ namespace SwimEditor
         suppressTreeSync = false;
       }
 
+      // Register for shell notifications on the current right-pane directory
+      WatchRightPaneDirectory(path);
+
       if (list.View == View.LargeIcon)
         UpdateIconSpacingForCentering();
     }
@@ -884,7 +1038,7 @@ namespace SwimEditor
 
     // --- ListView large-icon centering machinery ---
 
-    [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Auto)]
+    [DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Auto)]
     private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
 
     private const int LVMFIRST = 0x1000;
@@ -958,7 +1112,6 @@ namespace SwimEditor
         if (!TrySetSplitterDistance(split, desired))
         {
           // As a last resort, use Panel1's minimum; this is guaranteed valid.
-          // If *that* fails, log it and bail.
           if (!TrySetSplitterDistance(split, split.Panel1MinSize))
           {
             Debug.WriteLine("ApplyInitialLeftWidth: Failed to set SplitterDistance even to Panel1MinSize.");
@@ -992,14 +1145,12 @@ namespace SwimEditor
         split.SplitterDistance = clamped;
         return true;
       }
-      catch (InvalidOperationException ioe)
+      catch (InvalidOperationException)
       {
-        // Happens if bounds changed between validation and assignment.
         return false;
       }
-      catch (ArgumentOutOfRangeException aoore)
+      catch (ArgumentOutOfRangeException)
       {
-        // Be explicit about out-of-range too (rare but possible during rapid resizes).
         return false;
       }
     }
@@ -1009,6 +1160,267 @@ namespace SwimEditor
       if (value < min) return min;
       if (value > max) return max;
       return value;
+    }
+
+    // ---------- Shell registration + message handling ----------
+
+    private void WatchRightPaneDirectory(string path)
+    {
+      try
+      {
+        if (string.IsNullOrWhiteSpace(path) || !Directory.Exists(path))
+        {
+          UnregisterShellNotify();
+          return;
+        }
+
+        // Ensure this control has a handle for message delivery
+        if (!IsHandleCreated)
+        {
+          HandleCreated += (s, e) => WatchRightPaneDirectory(path);
+          return;
+        }
+
+        // Re-register for the new path
+        UnregisterShellNotify();
+
+        if (!TryPathToPidl(path, out currentPidl))
+          return;
+
+        var entries = new ShellNative.SHChangeNotifyEntry[]
+        {
+          new ShellNative.SHChangeNotifyEntry { pidl = currentPidl, fRecursive = false }
+        };
+
+        int sources = ShellNative.SHCNRF_ShellLevel | ShellNative.SHCNRF_InterruptLevel | ShellNative.SHCNRF_NewDelivery;
+
+        shNotifyHandle = ShellNative.SHChangeNotifyRegister(
+          Handle,
+          sources,
+          ShellNative.SHCNE_ALLEVENTS,
+          shNotifyMsg,
+          entries.Length,
+          entries
+        );
+
+        if (shNotifyHandle == IntPtr.Zero)
+          ReleaseCurrentPidl();
+      }
+      catch { }
+    }
+
+    private void UnregisterShellNotify()
+    {
+      try
+      {
+        if (shNotifyHandle != IntPtr.Zero)
+        {
+          try { ShellNative.SHChangeNotifyDeregister(shNotifyHandle); } catch { }
+          shNotifyHandle = IntPtr.Zero;
+        }
+      }
+      finally
+      {
+        ReleaseCurrentPidl();
+      }
+    }
+
+    private void ReleaseCurrentPidl()
+    {
+      try
+      {
+        if (currentPidl != IntPtr.Zero)
+        {
+          ShellNative.CoTaskMemFree(currentPidl);
+          currentPidl = IntPtr.Zero;
+        }
+      }
+      catch { }
+    }
+
+    private static bool TryPathToPidl(string path, out IntPtr pidl)
+    {
+      pidl = IntPtr.Zero;
+      try
+      {
+        uint dummy;
+        int hr = ShellNative.SHParseDisplayName(path, IntPtr.Zero, out pidl, 0, out dummy);
+        return hr == 0 && pidl != IntPtr.Zero;
+      }
+      catch
+      {
+        return false;
+      }
+    }
+
+    protected override void WndProc(ref Message m)
+    {
+      if (m.Msg == shNotifyMsg)
+      {
+        try
+        {
+          var current = list.Tag as string;
+          if (!string.IsNullOrEmpty(current) && Directory.Exists(current))
+          {
+            // Refresh the right list (NavigateTo keeps tree selection synced)
+            NavigateTo(current);
+
+            // Refresh the matching left tree node, but preserve expansion and selection beneath it
+            RefreshTreeForDirectory(current);
+          }
+        }
+        catch { }
+      }
+
+      base.WndProc(ref m);
+    }
+
+    private void RefreshTreeForDirectory(string dir)
+    {
+      try
+      {
+        var node = FindExistingNodeForPath(dir);
+        if (node == null || node.Tag is not NodeTag tag || !tag.IsDirectory)
+          return;
+
+        // Snapshot selection and expanded nodes within this subtree
+        string selectedPath = (tree.SelectedNodes.LastOrDefault()?.Tag as NodeTag)?.Path ?? string.Empty;
+        var expanded = new List<string>();
+        CollectExpandedPaths(node, expanded);
+
+        bool wasExpanded = node.Expanded;
+
+        // Repopulate children
+        PopulateDirectoryNode(node, tag.Path);
+        if (TryHasAnyChild(tag.Path)) AddPlaceholder(node);
+
+        // Restore expansion state
+        node.Expanded = wasExpanded;
+        RestoreExpandedPaths(node, expanded);
+
+        // Restore selection if it was inside this subtree
+        if (!string.IsNullOrEmpty(selectedPath) && PathStartsWith(selectedPath, tag.Path))
+          EnsurePathVisible(selectedPath);
+
+        tree.Invalidate();
+      }
+      catch { }
+    }
+
+    private void CollectExpandedPaths(CrownTreeNode rootNode, List<string> output)
+    {
+      if (rootNode == null || output == null) return;
+
+      foreach (var n in rootNode.Nodes)
+      {
+        var child = n as CrownTreeNode;
+        if (child?.Tag is NodeTag t && t.IsDirectory)
+        {
+          if (child.Expanded)
+            output.Add(t.Path);
+
+          // Recurse to capture deeper expanded nodes
+          if (child.Nodes != null && child.Nodes.Count > 0)
+            CollectExpandedPaths(child, output);
+        }
+      }
+    }
+
+    private void RestoreExpandedPaths(CrownTreeNode rootNode, List<string> expandedPaths)
+    {
+      if (rootNode == null || expandedPaths == null || expandedPaths.Count == 0) return;
+
+      // Breadth-first restore to avoid flicker from deep re-expands
+      var queue = new Queue<CrownTreeNode>();
+      queue.Enqueue(rootNode);
+
+      while (queue.Count > 0)
+      {
+        var cur = queue.Dequeue();
+        foreach (var n in cur.Nodes)
+        {
+          var child = n as CrownTreeNode;
+          if (child?.Tag is NodeTag t && t.IsDirectory)
+          {
+            if (expandedPaths.Any(p => SameDir(p, t.Path)))
+              child.Expanded = true;
+
+            if (child.Nodes != null && child.Nodes.Count > 0)
+              queue.Enqueue(child);
+          }
+        }
+      }
+    }
+
+    /// <summary>
+    /// Finds a node for the given path using only existing nodes (no creation or selection changes).
+    /// Returns null if not currently present in the tree (e.g., not expanded/visible).
+    /// </summary>
+    private CrownTreeNode FindExistingNodeForPath(string path)
+    {
+      if (string.IsNullOrWhiteSpace(path)) return null;
+      var root = tree.Nodes.FirstOrDefault(); // "This PC"
+      if (root == null || root.Nodes.Count == 0) return null;
+
+      var drive = DriveInfo.GetDrives()
+                           .FirstOrDefault(d => PathStartsWith(path, d.RootDirectory.FullName));
+      if (drive == null) return null;
+
+      var driveNode = root.Nodes.FirstOrDefault(n =>
+      {
+        if (n.Tag is NodeTag t) return SameDir(t.Path, drive.RootDirectory.FullName);
+        return false;
+      });
+      if (driveNode == null) return null;
+
+      if (SameDir(path, drive.RootDirectory.FullName))
+        return driveNode;
+
+      // If the drive node hasn't been populated yet, then the subtree isn't active in the UI.
+      if (driveNode.Nodes.Count == 1 && driveNode.Nodes[0].Tag == null)
+        return null;
+
+      string rel = GetRelativePathSafe(drive.RootDirectory.FullName, path);
+      if (string.IsNullOrEmpty(rel)) return driveNode;
+
+      var parts = rel.Split(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar },
+                            StringSplitOptions.RemoveEmptyEntries);
+
+      CrownTreeNode current = driveNode;
+      string curPath = drive.RootDirectory.FullName.TrimEnd(Path.DirectorySeparatorChar);
+
+      foreach (var part in parts)
+      {
+        curPath = Path.Combine(curPath, part);
+
+        // If this node has not yet been populated (placeholder), we consider it not active
+        if (current.Nodes.Count == 1 && current.Nodes[0].Tag == null)
+          return null;
+
+        var next = current.Nodes.FirstOrDefault(n =>
+        {
+          if (n.Tag is NodeTag t) return t.IsDirectory && SameDir(t.Path, curPath);
+          return false;
+        });
+
+        if (next == null)
+          return null;
+
+        current = next;
+      }
+
+      return current;
+    }
+
+    // --- Lifecycle: clean up shell registration ---
+
+    protected override void Dispose(bool disposing)
+    {
+      if (disposing)
+      {
+        try { UnregisterShellNotify(); } catch { }
+      }
+      base.Dispose(disposing);
     }
 
   }
