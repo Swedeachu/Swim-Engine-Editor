@@ -3,6 +3,7 @@ using System.Diagnostics;
 
 namespace SwimEditor
 {
+
   /// <summary>
   /// Explorer-like browser using CrownTreeView (left) + ListView (right).
   /// - Left shows all drives; expanding loads children on demand (skips symlinks/reparse)

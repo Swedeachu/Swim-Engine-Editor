@@ -19,11 +19,34 @@ namespace SwimEditor
   public class ConsoleLogControl : UserControl
   {
 
-    private static readonly Dictionary<string, string> CommandAliases = new(StringComparer.OrdinalIgnoreCase)
+    // Command descriptor and delegate
+    private sealed class CommandSpec
     {
-      ["cls"] = "clear",
-      ["print"] = "echo",
-    };
+      public string Name { get; }
+      public IReadOnlyList<string> Aliases { get; }
+      public string Usage { get; }
+      public Action<string> Handler { get; } // receives raw args string
+
+      public CommandSpec(string name, IEnumerable<string> aliases, string usage, Action<string> handler)
+      {
+        Name = name ?? throw new ArgumentNullException(nameof(name));
+        Aliases = (aliases ?? Array.Empty<string>()).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        Usage = usage ?? string.Empty;
+        Handler = handler ?? throw new ArgumentNullException(nameof(handler));
+      }
+
+      public IEnumerable<string> AllNames()
+      {
+        yield return Name;
+        foreach (var a in Aliases) yield return a;
+      }
+    }
+
+    private const int CommandsPageSize = 4;
+
+    private readonly List<CommandSpec> commands = new List<CommandSpec>();
+    private readonly Dictionary<string, CommandSpec> commandMap = new Dictionary<string, CommandSpec>(StringComparer.OrdinalIgnoreCase);
+    private bool commandsInitialized;
 
     private static readonly Regex CommandRegex = new(@"^\s*(?<verb>\S+)(?:\s+(?<args>.*))?$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
@@ -48,7 +71,7 @@ namespace SwimEditor
     private readonly System.Collections.Generic.List<string> history = new System.Collections.Generic.List<string>();
     private int historyIndex = -1;
 
-    private int _maxLines = 5000;
+    private int maxLines = 5000;
 
     public event Action<string> CommandEntered;
 
@@ -256,6 +279,91 @@ namespace SwimEditor
       VisibleChanged += (s, e) => SyncBarFromInner();
     }
 
+    // Command registration helpers
+    private void RegisterCommand(CommandSpec spec)
+    {
+      if (spec == null) throw new ArgumentNullException(nameof(spec));
+
+      commands.Add(spec);
+
+      foreach (var key in spec.AllNames())
+      {
+        if (string.IsNullOrWhiteSpace(key)) continue;
+        // Last-in-wins to allow intentional overrides, but avoid accidental duplicates:
+        commandMap[key] = spec;
+      }
+    }
+
+    private CommandSpec ResolveCommand(string verb)
+    {
+      if (string.IsNullOrWhiteSpace(verb)) return null;
+      return commandMap.TryGetValue(verb, out var spec) ? spec : null;
+    }
+
+    // Ensure built-ins are registered (help is first)
+    private void EnsureCommandsRegistered()
+    {
+      if (commandsInitialized) return;
+      RegisterBuiltInCommands();
+      commandsInitialized = true;
+    }
+
+    private void RegisterBuiltInCommands()
+    {
+      // 1) help (first)
+      string helpUsage = "help [int: page]\n  Shows available commands, 4 per page. Page is 1-based.";
+      RegisterCommand(new CommandSpec(
+        name: "help",
+        aliases: new[] { "h" },
+        usage: helpUsage,
+        handler: args =>
+        {
+          if (!ArgParser.TryParseArgs(
+                args, // arguments we are passing in to parse
+                out ArgValues? values, // the arguments parsed cleanly (by ref)
+                msg => AppendLine(msg + "\n" + helpUsage), // on error, write to console the error message and usage
+                Arg.Int("page", 1))) // the arg types we want to parse, in this case only page and the default value being 1 if their is no arg provided
+            return;
+
+          int page = (int)values["page"]; // retreive the parsed page argument and use it to show the provied help page
+          ShowHelpPage(page);
+        }));
+
+      // 2) version
+      RegisterCommand(new CommandSpec(
+        name: "version",
+        aliases: new[] { "v", "-v", "--v" },
+        usage: "version\n  Prints the editor version.",
+        handler: args =>
+        {
+          AppendLine("Swim Engine Editor 1.0");
+        }));
+
+      // 3) clear
+      RegisterCommand(new CommandSpec(
+        name: "clear",
+        aliases: new[] { "cls" },
+        usage: "clear\n  Clears the console.",
+        handler: args => { Clear(); }));
+
+      // 4) echo
+      RegisterCommand(new CommandSpec(
+        name: "echo",
+        aliases: new[] { "print" },
+        usage: "echo <text>\n  Prints text to the console.",
+        handler: args =>
+        {
+          AppendLine("> " + (args ?? string.Empty));
+        }));
+
+      // 5) log
+      RegisterCommand(new CommandSpec(
+        name: "log",
+        aliases: new[] { "save" },
+        usage: "log\n  Opens a save dialog and writes the console to a CSV (timestamped name).",
+        handler: args => { OpenFileDialogueToSaveConsoleLogToCSV(); }));
+    }
+
     // Access the inner TextBox Poison hosts
     private static TextBox GetInnerTextBox(PoisonTextBox host)
     {
@@ -266,7 +374,7 @@ namespace SwimEditor
     private void SyncBarFromInner()
     {
       var inner = GetInnerTextBox(log);
-      if (inner == null || !inner.IsHandleCreated) return;
+      if (inner == null || !inner.IsHandleCreated) { return; }
 
       int totalLines = Math.Max(1, (int)SendMessage(inner.Handle, EM_GETLINECOUNT, IntPtr.Zero, IntPtr.Zero));
       int first = (int)SendMessage(inner.Handle, EM_GETFIRSTVISIBLELINE, IntPtr.Zero, IntPtr.Zero);
@@ -281,8 +389,11 @@ namespace SwimEditor
 
       int maxFirst = Math.Max(0, vbar.Maximum - vbar.ViewSize);
       int clampedFirst = Math.Max(0, Math.Min(first, maxFirst));
+
       if (vbar.Value != clampedFirst)
+      {
         vbar.Value = clampedFirst;
+      }
 
       // Only toggle visibility; docking handles layout (no manual padding)
       vbar.Visible = vbar.Maximum > vbar.ViewSize;
@@ -375,13 +486,46 @@ namespace SwimEditor
       verb = m.Groups["verb"].Value;
       args = m.Groups["args"].Success ? m.Groups["args"].Value : string.Empty;
 
-      // Normalize aliases (e.g., "cls" => "clear", "print" => "echo")
-      if (CommandAliases.TryGetValue(verb, out var canonical))
+      return true;
+    }
+
+    private void ShowHelpPage(int page)
+    {
+      EnsureCommandsRegistered();
+
+      int total = commands.Count;
+      if (total == 0)
       {
-        verb = canonical;
+        AppendLine("No commands registered.");
+        return;
       }
 
-      return true;
+      int pageSize = Math.Max(1, CommandsPageSize);
+      int totalPages = (total + pageSize - 1) / pageSize;
+      page = Math.Max(1, Math.Min(page, totalPages));
+
+      int start = (page - 1) * pageSize;
+      int end = Math.Min(start + pageSize, total);
+
+      AppendLine($"Commands (page {page}/{totalPages}):");
+
+      for (int i = start; i < end; i++)
+      {
+        var c = commands[i];
+        string aliases = (c.Aliases.Count > 0) ? $" [{string.Join(", ", c.Aliases)}]" : string.Empty;
+        // One command per line (compact), followed by usage on the next line
+        AppendLine($"  {c.Name}{aliases}");
+        if (!string.IsNullOrWhiteSpace(c.Usage))
+        {
+          foreach (var usageLine in c.Usage.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
+            AppendLine($"    {usageLine}");
+        }
+      }
+
+      if (page < totalPages)
+      {
+        AppendLine($"(Use 'help {page + 1}' for more.)");
+      }
     }
 
     private void ParseEngineCommand(string command)
@@ -391,22 +535,22 @@ namespace SwimEditor
         return;
       }
 
-      switch (verb.ToLowerInvariant())
+      EnsureCommandsRegistered();
+
+      var spec = ResolveCommand(verb);
+      if (spec == null)
       {
-        case "clear":
-          // ignore args for clear
-          Clear();
-          return;
+        // Not a built-in: leave it to the external pipeline (already invoked in InputKeyDown)
+        return;
+      }
 
-        case "echo":
-          // append only the payload
-          AppendLine("> " + args);
-          return;
-
-        default:
-          // Not a built-in: let the caller's pipeline (already invoked) handle it.
-          // Intentionally do nothing here.
-          return;
+      try
+      {
+        spec.Handler(args);
+      }
+      catch (Exception ex)
+      {
+        AppendLine($"Command '{verb}' failed: {ex.Message}");
       }
     }
 
@@ -473,6 +617,83 @@ namespace SwimEditor
       }
     }
 
+    private void OpenFileDialogueToSaveConsoleLogToCSV()
+    {
+      if (InvokeRequired) { BeginInvoke(new Action(OpenFileDialogueToSaveConsoleLogToCSV)); return; }
+
+      // Capture current console lines
+      var inner = GetInnerTextBox(log);
+      string[] lines = (inner != null && inner.IsHandleCreated)
+        ? inner.Lines
+        : (log.Text ?? string.Empty).Split(new[] { Environment.NewLine }, StringSplitOptions.None);
+
+      // Default filename: timestamp
+      string timestamp = DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss");
+
+      using (var sfd = new System.Windows.Forms.SaveFileDialog())
+      {
+        sfd.Title = "Save console log as CSV";
+        sfd.Filter = "CSV files (*.csv)|*.csv|All files (*.*)|*.*";
+        sfd.DefaultExt = "csv";
+        sfd.AddExtension = true;
+        sfd.OverwritePrompt = true;
+        sfd.FileName = $"LOG {timestamp}.csv";
+
+        // Open the dialog to the folder the binary is running in
+        try
+        {
+          string exeDir;
+          try
+          {
+            var exePath = System.Diagnostics.Process.GetCurrentProcess().MainModule?.FileName;
+            exeDir = !string.IsNullOrEmpty(exePath)
+              ? System.IO.Path.GetDirectoryName(exePath) ?? AppDomain.CurrentDomain.BaseDirectory
+              : AppDomain.CurrentDomain.BaseDirectory;
+          }
+          catch
+          {
+            exeDir = AppDomain.CurrentDomain.BaseDirectory;
+          }
+
+          if (!string.IsNullOrWhiteSpace(exeDir) && System.IO.Directory.Exists(exeDir))
+          {
+            sfd.InitialDirectory = exeDir;
+          }
+        }
+        catch
+        {
+          // If anything goes wrong, we just let the dialog pick its default.
+        }
+
+        if (sfd.ShowDialog(FindForm()) == DialogResult.OK)
+        {
+          try
+          {
+            using (var writer = new System.IO.StreamWriter(
+                   sfd.FileName, false, new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: true)))
+            {
+              foreach (var line in lines)
+              {
+                string cell = (line ?? string.Empty).Replace("\"", "\"\"");
+                writer.Write('\"');
+                writer.Write(cell);
+                writer.Write('\"');
+                writer.WriteLine();
+              }
+            }
+          }
+          catch (Exception ex)
+          {
+            System.Windows.Forms.MessageBox.Show(this,
+              "Failed to save CSV:\n" + ex.Message,
+              "Save Error",
+              MessageBoxButtons.OK,
+              MessageBoxIcon.Error);
+          }
+        }
+      }
+    }
+
     /// <summary>Focuses the input box, placing caret at end.</summary>
     public void FocusInput()
     {
@@ -492,13 +713,11 @@ namespace SwimEditor
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public int MaxLines
     {
-      get { return _maxLines; }
-      set { _maxLines = Math.Max(100, value); }
+      get { return maxLines; }
+      set { maxLines = Math.Max(100, value); }
     }
 
     public string LogText => log.Text;
-
-    // --- utilities ----------------------------------------------------------
 
     private static bool IsAtBottom(TextBox inner)
     {
@@ -518,9 +737,9 @@ namespace SwimEditor
       if (inner == null || !inner.IsHandleCreated) return;
 
       int totalLines = (int)SendMessage(inner.Handle, EM_GETLINECOUNT, IntPtr.Zero, IntPtr.Zero);
-      if (totalLines <= _maxLines) return;
+      if (totalLines <= maxLines) return;
 
-      int removeLines = totalLines - _maxLines;
+      int removeLines = totalLines - maxLines;
       if (removeLines <= 0) return;
 
       int start = 0;
@@ -568,7 +787,6 @@ namespace SwimEditor
     }
 
   } // class ConsoleLogControl
-
 
   /// <summary>
   /// Flat PoisonTextBox: removes PoisonTextBox border/outline and enforces our dark text/bg.
