@@ -113,6 +113,12 @@ namespace SwimEditor
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public bool IsEnginePaused { get; private set; } = false;
 
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public bool IsEngineEditing { get; private set; } = true;
+
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public bool IsEngineStopped { get; private set; } = true;
+
     // P/Invoke for focus and child enumeration
     private delegate bool EnumChildProc(IntPtr hWnd, IntPtr lParam);
 
@@ -235,6 +241,56 @@ namespace SwimEditor
       {
         // ignore; keep UI responsive
       }
+    }
+
+    // Called when the play button is pressed, will unpause us and then start us in play mode as gaming for a clean play test run
+    public void GoIntoPlayMode()
+    {
+      IsEngineStopped = false;
+      IsEnginePaused = false;
+      IsEngineEditing = false;
+      SendEngineMessage("resume");
+      SendEngineMessage("game"); // takes us out of edit mode
+      SendEngineMessage("play");
+    }
+
+    // Called when stop button is pressed, takes us out of play mode into stopped which unpauses us and puts us back to editing
+    public void GoIntoStoppedMode()
+    {
+      IsEngineStopped = true;
+      IsEnginePaused = false;
+      IsEngineEditing = true;
+      SendEngineMessage("stop");
+      SendEngineMessage("resume"); // not sure if we want to call this first or last for intended behavior during state changes
+      SendEngineMessage("edit");
+    }
+
+    // Called when pause button is pressed, simply takes us into Paused mode, all other states remain
+    public void GoIntoPauseMode()
+    {
+      SendEngineMessage("pause"); 
+      IsEnginePaused = true;
+    }
+
+    // Called when pause button is pressed while things are paused, simply takes us out of Paused mode, all other states remain
+    public void GoIntoResumedMode()
+    {
+      SendEngineMessage("resume"); // unpauses us
+      IsEnginePaused = false;
+    }
+
+    // Called when edit button is pressed, simply takes us into edit mode, all other states 
+    public void GoIntoEditMode()
+    {
+      SendEngineMessage("edit"); // takes us into edit mode for free cam and no player controller 
+      IsEngineEditing = true;
+    }
+
+    // Called when edit button is pressed while things are in edit mode, simply takes us out of edit mode, all other states remain
+    public void GoIntoGameMode()
+    {
+      SendEngineMessage("game"); // takes us out of edit mode
+      IsEngineEditing = false;
     }
 
     // Variadic-style message sender.

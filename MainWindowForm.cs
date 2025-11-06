@@ -27,6 +27,7 @@ namespace SwimEditor
 
     // transport buttons (stored as fields so we can update state/colors)
     private CrownButton playButton;
+    private CrownButton editButton;
     private CrownButton pauseButton;
     private CrownButton stopButton;
 
@@ -89,13 +90,14 @@ namespace SwimEditor
       }
 
       playButton = MakeBtn("Play");
+      editButton = MakeBtn("Edit");
       pauseButton = MakeBtn("Pause");
       stopButton = MakeBtn("Stop");
 
       // subtle hover cue
       void AccentOn(object? s, EventArgs e) => ((CrownButton)s!).ForeColor = SwimEditorTheme.Accent;
       void AccentOff(object? s, EventArgs e) => ((CrownButton)s!).ForeColor = SwimEditorTheme.Text;
-      foreach (var b in new[] { playButton, pauseButton, stopButton })
+      foreach (var b in new[] { playButton, editButton, pauseButton, stopButton })
       {
         b.MouseEnter += AccentOn;
         b.MouseLeave += AccentOff;
@@ -103,10 +105,12 @@ namespace SwimEditor
 
       // wire clicks
       playButton.Click += OnPlayClicked;
+      editButton.Click += OnEditClicked;
       pauseButton.Click += OnPauseClicked;
       stopButton.Click += OnStopClicked;
 
       centerRow.Controls.Add(playButton);
+      centerRow.Controls.Add(editButton);
       centerRow.Controls.Add(pauseButton);
       centerRow.Controls.Add(stopButton);
 
@@ -236,12 +240,27 @@ namespace SwimEditor
 
     private void OnPlayClicked(object? sender, EventArgs e)
     {
-      // safety: play does nothing if already active (running and not paused)
-      if (gameView != null && !(gameView.IsEngineRunning && !gameView.IsEnginePaused))
+      if (gameView == null || !gameView.IsEngineRunning) return;
+
+      // gameView.PlayEngine(); // starts or resumes as needed
+      gameView.GoIntoPlayMode();
+      UpdateTransportUi();
+    }
+
+    private void OnEditClicked(object? sender, EventArgs e)
+    {
+      if (gameView == null || !gameView.IsEngineRunning) return;
+
+      if (gameView.IsEngineEditing)
       {
-        gameView.PlayEngine(); // starts or resumes as needed
-        UpdateTransportUi();
+        gameView.GoIntoGameMode();
       }
+      else
+      {
+        gameView.GoIntoEditMode();
+      }
+
+      UpdateTransportUi();
     }
 
     private void OnPauseClicked(object? sender, EventArgs e)
@@ -250,13 +269,13 @@ namespace SwimEditor
 
       if (!gameView.IsEnginePaused)
       {
-        gameView.PauseEngine();
-        pauseButton.Text = "Resume";
+        // gameView.PauseEngine();
+        gameView.GoIntoPauseMode();
       }
       else
       {
-        gameView.ResumeEngine();
-        pauseButton.Text = "Pause";
+        // gameView.ResumeEngine();
+        gameView?.GoIntoResumedMode();
       }
 
       UpdateTransportUi();
@@ -266,7 +285,8 @@ namespace SwimEditor
     {
       if (gameView == null || !gameView.IsEngineRunning) return;
 
-      gameView.StopEngine();
+      // gameView.StopEngine();
+      gameView.GoIntoStoppedMode();
       UpdateTransportUi();
     }
 
@@ -274,37 +294,38 @@ namespace SwimEditor
     {
       if (gameView == null)
       {
-        SetBtnState(active: false, play: true, pause: false, stop: false);
-        pauseButton.Text = "Pause";
         return;
       }
 
-      bool running = gameView.IsEngineRunning;
-      bool paused = gameView.IsEnginePaused;
+      bool stopped = gameView.IsEngineStopped;
+
+      if (gameView.IsEnginePaused)
+      {
+        pauseButton.Text = "Resume";
+      }
+      else
+      {
+        pauseButton.Text = "Pause";
+      }
+
+      if (gameView.IsEngineEditing)
+      {
+        editButton.Text = "Game"; // TODO: better text
+      }
+      else
+      {
+        editButton.Text = "Edit";
+      }
 
       // Enablement rules
-      playButton.Enabled = !running || paused; // can play if not running or paused
-      pauseButton.Enabled = running;            // only when running
-      stopButton.Enabled = running;            // only when running
-
-      // Label the pause button based on state
-      pauseButton.Text = paused ? "Resume" : "Pause";
+      playButton.Enabled = stopped; // can play if stopped 
+      pauseButton.Enabled = !stopped;
+      stopButton.Enabled = !stopped;
 
       // Visual state (simple color UX)
-      SetActive(playButton, running && !paused);
-      SetActive(pauseButton, running && paused);
-      SetActive(stopButton, false);
-    }
-
-    private void SetBtnState(bool active, bool play, bool pause, bool stop)
-    {
-      playButton.Enabled = play;
-      pauseButton.Enabled = pause;
-      stopButton.Enabled = stop;
-
-      SetActive(playButton, active);
-      SetActive(pauseButton, false);
-      SetActive(stopButton, false);
+      SetActive(playButton, stopped);
+      SetActive(pauseButton, !stopped);
+      SetActive(stopButton, !stopped);
     }
 
     private void SetActive(CrownButton btn, bool active)

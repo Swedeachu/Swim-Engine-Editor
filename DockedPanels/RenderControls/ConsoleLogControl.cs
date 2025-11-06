@@ -321,7 +321,7 @@ namespace SwimEditor
           if (!ArgParser.TryParseArgs(
                 args, // arguments we are passing in to parse
                 out ArgValues? values, // the arguments parsed cleanly (by ref)
-                msg => AppendLine(msg + "\n" + helpUsage), // on error, write to console the error message and usage
+                msg => AppendLine(msg + " | Usage: " + helpUsage), // on error, write to console the error message and usage
                 Arg.Int("page", 1))) // the arg types we want to parse, in this case only page and the default value being 1 if their is no arg provided
             return;
 
