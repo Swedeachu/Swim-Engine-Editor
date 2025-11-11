@@ -519,7 +519,7 @@ namespace SwimEditor
       var psi = new ProcessStartInfo
       {
         FileName = exePath,
-        Arguments = $"--parent-hwnd {RenderHandle}",
+        Arguments = $"--parent-hwnd {RenderHandle} --state editing", // start the engine in an editing state
         WorkingDirectory = exeDir,
         UseShellExecute = false,
         RedirectStandardOutput = true,
