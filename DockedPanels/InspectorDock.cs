@@ -1,25 +1,20 @@
-﻿using ReaLTaiizor.Controls;
-using ReaLTaiizor.Docking.Crown;
-using System;
-using System.ComponentModel;
-using System.Drawing;
+﻿using System.ComponentModel;
 using System.Text.Json;
-using System.Windows.Forms;
 using WeifenLuo.WinFormsUI.Docking;
 using Panel = ReaLTaiizor.Controls.Panel;
 
 namespace SwimEditor
 {
-  // THIS IS JUST A PLACE HOLDER, WILL BE CUSTOMIZED LATER FOR EDITING TRANSFORMS, MATERIALS, TAGS, OTHER SERIALIZED COMPONENTS
+
   public class InspectorDock : DockContent
   {
     private PropertyGrid propertyGrid;
-    private Panel container; 
+    private Panel container;
 
     public InspectorDock()
     {
       // Container panel to provide consistent background and padding if needed
-      container = new Panel 
+      container = new Panel
       {
         Dock = DockStyle.Fill,
         BackColor = SwimEditorTheme.Panel
@@ -227,41 +222,17 @@ namespace SwimEditor
     }
 
     // ------------------------------------------------------------------
-    // Strongly-typed MATERIAL inspector (example layout)
+    // MATERIAL inspector: matches SerializeMaterial exactly
     // ------------------------------------------------------------------
     public sealed class MaterialInspectorModel
     {
       [Category("Material")]
-      [DisplayName("Name")]
-      public string Name { get; set; }
-
-      [Category("Material - Albedo")]
-      [DisplayName("R")]
-      public float AlbedoR { get; set; }
-
-      [Category("Material - Albedo")]
-      [DisplayName("G")]
-      public float AlbedoG { get; set; }
-
-      [Category("Material - Albedo")]
-      [DisplayName("B")]
-      public float AlbedoB { get; set; }
-
-      [Category("Material - Albedo")]
-      [DisplayName("A")]
-      public float AlbedoA { get; set; } = 1.0f;
+      [DisplayName("Albedo Texture File Path")]
+      public string AlbedoTextureFilePath { get; set; } = string.Empty;
 
       [Category("Material")]
-      [DisplayName("Metallic")]
-      public float Metallic { get; set; }
-
-      [Category("Material")]
-      [DisplayName("Roughness")]
-      public float Roughness { get; set; }
-
-      [Category("Material")]
-      [DisplayName("Shader")]
-      public string Shader { get; set; }
+      [DisplayName("Model File Path")]
+      public string ModelFilePath { get; set; } = string.Empty;
 
       public static MaterialInspectorModel FromJson(string rawJson)
       {
@@ -275,55 +246,27 @@ namespace SwimEditor
           using var doc = JsonDocument.Parse(rawJson);
           var root = doc.RootElement;
 
-          // name / shader
-          if (root.TryGetProperty("name", out var nameProp) &&
-              nameProp.ValueKind == JsonValueKind.String)
+          if (root.ValueKind == JsonValueKind.Object)
           {
-            model.Name = nameProp.GetString();
-          }
+            if (root.TryGetProperty("albedoTextureFilePath", out var albedoProp) &&
+                albedoProp.ValueKind == JsonValueKind.String)
+            {
+              model.AlbedoTextureFilePath = albedoProp.GetString() ?? string.Empty;
+            }
 
-          if (root.TryGetProperty("shader", out var shaderProp) &&
-              shaderProp.ValueKind == JsonValueKind.String)
-          {
-            model.Shader = shaderProp.GetString();
+            if (root.TryGetProperty("modelFilePath", out var modelProp) &&
+                modelProp.ValueKind == JsonValueKind.String)
+            {
+              model.ModelFilePath = modelProp.GetString() ?? string.Empty;
+            }
           }
-
-          // albedo { r, g, b, a }
-          if (root.TryGetProperty("albedo", out var albedoElem) &&
-              albedoElem.ValueKind == JsonValueKind.Object)
-          {
-            model.AlbedoR = ReadFloat(albedoElem, "r");
-            model.AlbedoG = ReadFloat(albedoElem, "g");
-            model.AlbedoB = ReadFloat(albedoElem, "b");
-            model.AlbedoA = ReadFloat(albedoElem, "a");
-            if (model.AlbedoA == 0f) model.AlbedoA = 1.0f; // sane default
-          }
-
-          // metallic / roughness
-          model.Metallic = ReadFloat(root, "metallic");
-          model.Roughness = ReadFloat(root, "roughness");
         }
         catch
         {
-          // ignore parse errors; keep defaults
+          // keep defaults
         }
 
         return model;
-      }
-
-      private static float ReadFloat(JsonElement parent, string name)
-      {
-        if (parent.TryGetProperty(name, out var prop) &&
-            prop.ValueKind == JsonValueKind.Number)
-        {
-          if (prop.TryGetSingle(out var f))
-            return f;
-
-          if (prop.TryGetDouble(out var d))
-            return (float)d;
-        }
-
-        return 0f;
       }
     }
 
@@ -332,26 +275,26 @@ namespace SwimEditor
     // ------------------------------------------------------------------
     private sealed class JsonObjectView : ICustomTypeDescriptor
     {
-      private readonly string _displayName;
-      private readonly JsonDocument _doc;
-      private readonly JsonElement _element;
-      private readonly PropertyDescriptorCollection _props;
+      private readonly string displayName;
+      private readonly JsonDocument doc;
+      private readonly JsonElement element;
+      private readonly PropertyDescriptorCollection props;
 
       public JsonObjectView(string displayName, string rawJson)
       {
-        _displayName = displayName;
+        this.displayName = displayName;
 
         if (string.IsNullOrWhiteSpace(rawJson))
         {
-          _doc = JsonDocument.Parse("{}");
+          doc = JsonDocument.Parse("{}");
         }
         else
         {
-          _doc = JsonDocument.Parse(rawJson);
+          doc = JsonDocument.Parse(rawJson);
         }
 
-        _element = _doc.RootElement;
-        _props = BuildProperties(_element);
+        element = doc.RootElement;
+        props = BuildProperties(element);
       }
 
       private static PropertyDescriptorCollection BuildProperties(JsonElement elem)
@@ -373,9 +316,9 @@ namespace SwimEditor
 
       public AttributeCollection GetAttributes() => AttributeCollection.Empty;
 
-      public string GetClassName() => _displayName;
+      public string GetClassName() => displayName;
 
-      public string GetComponentName() => _displayName;
+      public string GetComponentName() => displayName;
 
       public TypeConverter GetConverter() => TypeDescriptor.GetConverter(typeof(object));
 
@@ -389,27 +332,27 @@ namespace SwimEditor
 
       public EventDescriptorCollection GetEvents(Attribute[] attributes) => EventDescriptorCollection.Empty;
 
-      public PropertyDescriptorCollection GetProperties() => _props;
+      public PropertyDescriptorCollection GetProperties() => props;
 
-      public PropertyDescriptorCollection GetProperties(Attribute[] attributes) => _props;
+      public PropertyDescriptorCollection GetProperties(Attribute[] attributes) => props;
 
       public object GetPropertyOwner(PropertyDescriptor pd) => this;
 
       private sealed class JsonPropertyDescriptor : PropertyDescriptor
       {
-        private readonly JsonElement _value;
+        private readonly JsonElement value;
 
         public JsonPropertyDescriptor(string name, JsonElement value)
           : base(name, null)
         {
-          _value = value;
+          this.value = value;
         }
 
         public override bool CanResetValue(object component) => false;
 
         public override Type ComponentType => typeof(JsonObjectView);
 
-        public override object GetValue(object component) => ToDisplayString(_value);
+        public override object GetValue(object component) => ToDisplayString(value);
 
         public override bool IsReadOnly => true;
 

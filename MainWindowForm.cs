@@ -1,8 +1,4 @@
-﻿using System;
-using System.IO;
-using System.Drawing;
-using System.Windows.Forms;
-using WeifenLuo.WinFormsUI.Docking;
+﻿using WeifenLuo.WinFormsUI.Docking;
 using ReaLTaiizor.Controls;
 
 namespace SwimEditor
