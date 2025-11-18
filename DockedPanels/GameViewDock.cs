@@ -91,6 +91,7 @@ namespace SwimEditor
 
     // Subscribe to receive each console line from the engine
     public event Action<string> EngineConsoleLine;
+    public event Action<string> RawEngineMessage;
 
     // Notify editor to refresh transport UI when engine state changes
     public event Action EngineStateChanged;
@@ -129,6 +130,16 @@ namespace SwimEditor
         Dock = DockStyle.Fill,
         BackColor = Color.Black
       };
+
+      // Hook IPC and pause provider immediately so messages can be received
+      if (renderSurface is DoubleBufferedPanel panel)
+      {
+        panel.SetPausedProvider(() => IsEnginePaused);
+
+        // ensure single subscription
+        panel.EngineMessageReceived -= OnEngineMessageReceived;
+        panel.EngineMessageReceived += OnEngineMessageReceived;
+      }
 
       Controls.Add(renderSurface);
       ShowHint = DockState.Document;
@@ -608,15 +619,10 @@ namespace SwimEditor
       SetWindowPos(engineChildHwnd, HWND_TOP, 0, 0, renderSurface.ClientSize.Width, renderSurface.ClientSize.Height, 0);
       MoveWindow(engineChildHwnd, 0, 0, renderSurface.ClientSize.Width, renderSurface.ClientSize.Height, false);
 
-      // Give the panel a reference to forward messages
+      // Just attach the child handle; IPC wiring is done in the constructor
       if (renderSurface is DoubleBufferedPanel panel)
       {
         panel.SetChildWindow(engineChildHwnd);
-        panel.SetPausedProvider(() => IsEnginePaused); // Let panel know when paused
-
-        // subscribe once
-        panel.EngineMessageReceived -= OnEngineMessageReceived; // avoid dupes
-        panel.EngineMessageReceived += OnEngineMessageReceived;
       }
 
       SetFocus(engineChildHwnd);
@@ -740,6 +746,7 @@ namespace SwimEditor
     private void OnEngineMessageReceived(ulong channel, string text)
     {
       EngineConsoleLine?.Invoke($"[Message from Engine to Editor: {channel}] {text}");
+      RawEngineMessage?.Invoke(text);
 
       // This should be parsed elsewhere in MainWindowForm to be able to talk to the other panels such as the hierarchy 
     }

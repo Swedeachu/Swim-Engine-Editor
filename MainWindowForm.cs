@@ -162,9 +162,23 @@ namespace SwimEditor
       console.AppendLog("Swim Engine Editor v1.0");
       // Make it so game view cout stream callback logs to the console
       gameView.EngineConsoleLine += line => console.AppendLog(line);
+      gameView.RawEngineMessage += line => hierarchy.Command(line);
 
-      // keep inspector synced
-      hierarchy.OnSelectionChanged += obj => inspector.SetInspectedObject(obj);
+      // keep inspector synced:
+      // - Hierarchy raises with the selected CrownTreeNode
+      // - We send the *Tag* (SceneEntity or SceneComponent) to the inspector
+      hierarchy.OnSelectionChanged += obj =>
+      {
+        if (obj is CrownTreeNode node)
+        {
+          // Prefer inspecting the underlying data model; fall back to the node itself
+          inspector.SetInspectedObject(node.Tag ?? node);
+        }
+        else
+        {
+          inspector.SetInspectedObject(obj);
+        }
+      };
 
       // Initial toolbar: assume the GameView will auto-start the engine on Shown.
       // We want Play disabled, Pause/Stop enabled right away.

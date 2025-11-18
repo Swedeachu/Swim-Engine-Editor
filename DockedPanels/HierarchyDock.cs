@@ -1,197 +1,276 @@
-﻿using WeifenLuo.WinFormsUI.Docking;
+﻿using System;
+using System.Linq;
+using System.Collections.Generic;
+using System.Text.Json;
+using WeifenLuo.WinFormsUI.Docking;
 using ReaLTaiizor.Controls;
 
 namespace SwimEditor
 {
+  // Backing models for hierarchy + inspector
+
+  public class SceneComponent
+  {
+    public string Name { get; set; }
+    public string RawJson { get; set; }  // <- store raw JSON text instead of JsonElement
+
+    public override string ToString() => Name ?? "Component";
+  }
+
+  public class SceneEntity
+  {
+    public int Id { get; set; }
+    public int? ParentId { get; set; }
+
+    public List<SceneComponent> Components { get; } = new();
+    public List<SceneEntity> Children { get; } = new();
+
+    public JsonElement RawJson { get; set; } // if you want to inspect the full blob later
+
+    public override string ToString()
+    {
+      // You can later add a "name" field to your JSON and display that instead.
+      return $"Entity {Id}";
+    }
+  }
 
   public class HierarchyDock : DockContent
   {
-
     private CrownTreeView treeView;
 
+    // MainWindow subscribes and uses node.Tag to drive InspectorDock
     public event Action<object> OnSelectionChanged;
 
     public HierarchyDock()
     {
-      // Dark theme with CrownTreeView (ReaLTaiizor) replacing DarkTreeView
       treeView = new CrownTreeView
       {
-        Dock = DockStyle.Fill
+        Dock = System.Windows.Forms.DockStyle.Fill
       };
 
-      // Selection change uses SelectedNodesChanged, not AfterSelect
       treeView.SelectedNodesChanged += (s, e) =>
       {
         var node = treeView.SelectedNodes.LastOrDefault();
         if (node != null)
         {
+          // Node.Tag will be SceneEntity or SceneComponent
           OnSelectionChanged?.Invoke(node);
         }
       };
 
       Controls.Add(treeView);
+    }
 
-      // Populate with a large fake scene for testing
-      PopulateFakeScene(objectCount: 50, maxComponentsPerObject: 8, randomSeed: 1337);
+    public void Command(string command)
+    {
+      if (string.IsNullOrEmpty(command))
+        return;
 
-      // Expand the root for immediate visual verification
-      if (treeView.Nodes.Count > 0)
+      if (command.StartsWith("scene"))
       {
-        treeView.Nodes[0].Expanded = true;
+        if (command.StartsWith("scene load:"))
+        {
+          LoadScene(command);
+        }
+      }
+    }
+
+    private void LoadScene(string command)
+    {
+      const string prefix = "scene load:";
+
+      if (!command.StartsWith(prefix))
+        return;
+
+      string json = command.Substring(prefix.Length).TrimStart();
+      if (string.IsNullOrWhiteSpace(json))
+        return;
+
+      try
+      {
+        using JsonDocument doc = JsonDocument.Parse(json);
+        JsonElement root = doc.RootElement;
+
+        // Scene name from "scene" property, default to "Scene"
+        string sceneName = "Scene";
+        if (root.ValueKind == JsonValueKind.Object &&
+            root.TryGetProperty("scene", out var sceneProp) &&
+            sceneProp.ValueKind == JsonValueKind.String)
+        {
+          sceneName = sceneProp.GetString() ?? "Scene";
+        }
+
+        // Parse entities from "entities" array (SandBox.json layout)
+        List<SceneEntity> roots = ParseEntitiesFromRoot(root);
+
+        // Build tree view
+        treeView.Nodes.Clear();
+
+        var sceneNode = new CrownTreeNode(sceneName);
+        treeView.Nodes.Add(sceneNode);
+
+        foreach (var entity in roots)
+        {
+          AddEntityNodeRecursive(entity, sceneNode);
+        }
+
+        sceneNode.Expanded = true;
+      }
+      catch (Exception ex)
+      {
+        treeView.Nodes.Clear();
+
+        var errorRoot = new CrownTreeNode("Scene (Failed to load)");
+        errorRoot.Nodes.Add(new CrownTreeNode(ex.Message));
+        treeView.Nodes.Add(errorRoot);
+
+        errorRoot.Expanded = true;
       }
     }
 
     /// <summary>
-    /// Creates a big fake hierarchy to test CrownTreeView scrolling and layout.
-    /// - Many root-level and nested objects
-    /// - Variable component counts
-    /// - Some long names to exercise horizontal scrolling
+    /// Parse SandBox-style scene JSON into a list of root entities.
+    /// Expected root shape:
+    /// {
+    ///   "scene": "SandBox",
+    ///   "entities": [
+    ///     { "id": 33, "parent": null, "transform":{...}, "material":{...} },
+    ///     { "id": 32, "parent": 33,  "transform":{...} },
+    ///     ...
+    ///   ]
+    /// }
     /// </summary>
-    private void PopulateFakeScene(int objectCount, int maxComponentsPerObject, int randomSeed = 0)
+    private List<SceneEntity> ParseEntitiesFromRoot(JsonElement root)
     {
-      var rnd = (randomSeed == 0) ? new Random() : new Random(randomSeed);
+      var entitiesById = new Dictionary<int, SceneEntity>();
 
-      string[] componentPool =
+      // Get entities array
+      JsonElement entitiesArray;
+
+      if (root.ValueKind == JsonValueKind.Object &&
+          root.TryGetProperty("entities", out var eProp) &&
+          eProp.ValueKind == JsonValueKind.Array)
       {
-        "Transform",
-        "MeshRenderer",
-        "MeshFilter",
-        "SkinnedMeshRenderer",
-        "BoxCollider",
-        "SphereCollider",
-        "CapsuleCollider",
-        "Rigidbody",
-        "AudioSource",
-        "AudioListener",
-        "Animator",
-        "ParticleSystem",
-        "Light",
-        "Camera",
-        "NavMeshAgent",
-        "Script<RotateBehavior>",
-        "Script<FollowTarget>",
-        "Script<AIController>",
-        "Canvas",
-        "RectTransform",
-        "Image",
-        "Text",
-        "Button",
-        "RawImage",
-        "EventSystem"
-      };
-
-      string[] longNameTokens =
+        entitiesArray = eProp;
+      }
+      else if (root.ValueKind == JsonValueKind.Array)
       {
-        "Ultra", "Hyper", "Mega", "Giga", "Quantum", "Neon", "Retro", "Voxel",
-        "Procedural", "PBR", "Instanced", "Deferred", "Clustered", "Occlusion",
-        "Volumetric", "Holographic", "Spline", "Bezier", "Anisotropic", "Temporal"
-      };
-
-      treeView.Nodes.Clear();
-
-      var root = new CrownTreeNode("Scene (Test World)");
-      treeView.Nodes.Add(root);
-
-      // Add a few fixed systems up top
-      var systems = new CrownTreeNode("Systems");
-      systems.Nodes.Add(new CrownTreeNode("RenderSystem"));
-      systems.Nodes.Add(new CrownTreeNode("PhysicsSystem"));
-      systems.Nodes.Add(new CrownTreeNode("AudioSystem"));
-      systems.Nodes.Add(new CrownTreeNode("UISystem"));
-      root.Nodes.Add(systems);
-
-      // Cameras / lights
-      var cameras = new CrownTreeNode("Cameras");
-      cameras.Nodes.Add(new CrownTreeNode("Main Camera"));
-      cameras.Nodes.Add(new CrownTreeNode("UI Camera"));
-      root.Nodes.Add(cameras);
-
-      var lights = new CrownTreeNode("Lights");
-      lights.Nodes.Add(new CrownTreeNode("Directional Light"));
-      lights.Nodes.Add(new CrownTreeNode("Fill Light"));
-      lights.Nodes.Add(new CrownTreeNode("Rim Light"));
-      root.Nodes.Add(lights);
-
-      // Massive batch of objects
-      var objectsRoot = new CrownTreeNode("GameObjects");
-      root.Nodes.Add(objectsRoot);
-
-      for (int i = 0; i < objectCount; i++)
+        // Fallback: treat the root itself as an array of entities
+        entitiesArray = root;
+      }
+      else
       {
-        // Mix in some long/varied names to force horizontal scroll when needed
-        string longBit = (i % 9 == 0)
-          ? $"_{longNameTokens[rnd.Next(longNameTokens.Length)]}_{longNameTokens[rnd.Next(longNameTokens.Length)]}_ID{i:0000}"
-          : $"_{i:0000}";
-
-        var go = new CrownTreeNode("GameObject" + longBit);
-        objectsRoot.Nodes.Add(go);
-
-        // Always include Transform
-        go.Nodes.Add(new CrownTreeNode("Transform"));
-
-        // Random number of other components
-        int compCount = 1 + rnd.Next(Math.Max(1, maxComponentsPerObject));
-        for (int c = 0; c < compCount; c++)
-        {
-          string comp = componentPool[rnd.Next(componentPool.Length)];
-
-          // Occasionally create very long component names to test h-scroll
-          if (rnd.NextDouble() < 0.08)
-          {
-            comp += $" [LOD={rnd.Next(0, 4)}] (Layer={rnd.Next(0, 32)}) <Tag=Test_{i % 7}>";
-          }
-
-          go.Nodes.Add(new CrownTreeNode(comp));
-        }
-
-        // Some nested children to test deeper trees
-        if (i % 7 == 0)
-        {
-          var childA = new CrownTreeNode("Child_A" + (i % 100));
-          childA.Nodes.Add(new CrownTreeNode("Transform"));
-          childA.Nodes.Add(new CrownTreeNode("MeshRenderer"));
-          childA.Nodes.Add(new CrownTreeNode("BoxCollider"));
-
-          if (i % 14 == 0)
-          {
-            var grand = new CrownTreeNode("GrandChild_X" + (i % 37));
-            grand.Nodes.Add(new CrownTreeNode("Transform"));
-            grand.Nodes.Add(new CrownTreeNode("ParticleSystem"));
-
-            if (i % 28 == 0)
-            {
-              var gg = new CrownTreeNode("GreatGrandChild_" + (i % 11));
-              gg.Nodes.Add(new CrownTreeNode("Transform"));
-              gg.Nodes.Add(new CrownTreeNode("Script<AIController>"));
-              grand.Nodes.Add(gg);
-            }
-
-            childA.Nodes.Add(grand);
-          }
-
-          var childB = new CrownTreeNode("Child_B" + (i % 33));
-          childB.Nodes.Add(new CrownTreeNode("Transform"));
-          childB.Nodes.Add(new CrownTreeNode("RectTransform"));
-          childB.Nodes.Add(new CrownTreeNode("Image"));
-          childB.Nodes.Add(new CrownTreeNode("Button"));
-
-          go.Nodes.Add(childA);
-          go.Nodes.Add(childB);
-        }
-
-        // Expand a subset for visual diversity
-        if (i < 5 || (i % 25 == 0))
-          go.Expanded = true;
+        // Unknown shape, return empty
+        return new List<SceneEntity>();
       }
 
-      // Expand upper groups for immediate content without fully opening everything
-      root.Expanded = true;
-      systems.Expanded = true;
-      cameras.Expanded = true;
-      lights.Expanded = true;
-      objectsRoot.Expanded = true;
+      // First pass: create all entities and collect components (transform, material, etc.)
+      foreach (var elem in entitiesArray.EnumerateArray())
+      {
+        if (elem.ValueKind != JsonValueKind.Object)
+          continue;
+
+        if (!elem.TryGetProperty("id", out var idProp) ||
+            idProp.ValueKind != JsonValueKind.Number ||
+            !idProp.TryGetInt32(out var id))
+        {
+          continue; // invalid entity, skip
+        }
+
+        int? parentId = null;
+        if (elem.TryGetProperty("parent", out var parentProp) &&
+            parentProp.ValueKind == JsonValueKind.Number &&
+            parentProp.TryGetInt32(out var pid))
+        {
+          parentId = pid;
+        }
+
+        var entity = new SceneEntity
+        {
+          Id = id,
+          ParentId = parentId,
+          RawJson = elem
+        };
+
+        // Treat any object-valued property (except "id" / "parent") as a component
+        foreach (var prop in elem.EnumerateObject())
+        {
+          if (prop.NameEquals("id") || prop.NameEquals("parent"))
+            continue;
+
+          if (prop.Value.ValueKind == JsonValueKind.Object)
+          {
+            // Name like "Transform", "Material" etc.
+            string friendlyName = char.ToUpperInvariant(prop.Name[0]) + prop.Name.Substring(1);
+            var comp = new SceneComponent
+            {
+              Name = friendlyName,
+              RawJson = prop.Value.GetRawText()
+            };
+            entity.Components.Add(comp);
+          }
+        }
+
+        entitiesById[id] = entity;
+      }
+
+      // Second pass: hook up children by ParentId
+      var roots = new List<SceneEntity>();
+
+      foreach (var ent in entitiesById.Values)
+      {
+        if (ent.ParentId.HasValue && entitiesById.TryGetValue(ent.ParentId.Value, out var parent))
+        {
+          parent.Children.Add(ent);
+        }
+        else
+        {
+          // Parent null or missing -> root-level entity under scene node
+          roots.Add(ent);
+        }
+      }
+
+      return roots;
+    }
+
+    /// <summary>
+    /// Unity-like placement:
+    /// SandBox
+    ///   Entity 33
+    ///     Transform
+    ///     Material
+    ///     Entity 32
+    ///       Transform
+    /// </summary>
+    private void AddEntityNodeRecursive(SceneEntity entity, CrownTreeNode parentNode)
+    {
+      string label = $"Entity {entity.Id}";
+
+      var entityNode = new CrownTreeNode(label)
+      {
+        Tag = entity
+      };
+      parentNode.Nodes.Add(entityNode);
+
+      // Components directly under the entity
+      foreach (var comp in entity.Components)
+      {
+        var compNode = new CrownTreeNode(comp.Name ?? "Component")
+        {
+          Tag = comp
+        };
+        entityNode.Nodes.Add(compNode);
+      }
+
+      // Then child entities
+      foreach (var child in entity.Children)
+      {
+        AddEntityNodeRecursive(child, entityNode);
+      }
+
+      entityNode.Expanded = true;
     }
 
   } // class HierarchyDock
 
-} // Namespace SwimEditor
+} // namespace SwimEditor
