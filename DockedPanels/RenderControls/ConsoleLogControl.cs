@@ -2,7 +2,6 @@
 using System.ComponentModel;
 using ReaLTaiizor.Controls;
 using ReaLTaiizor.Enum.Poison;
-using System.Text.RegularExpressions;
 
 namespace SwimEditor
 {
@@ -19,36 +18,10 @@ namespace SwimEditor
   public class ConsoleLogControl : UserControl
   {
 
-    // Command descriptor and delegate
-    private sealed class CommandSpec
-    {
-      public string Name { get; }
-      public IReadOnlyList<string> Aliases { get; }
-      public string Usage { get; }
-      public Action<string> Handler { get; } // receives raw args string
-
-      public CommandSpec(string name, IEnumerable<string> aliases, string usage, Action<string> handler)
-      {
-        Name = name ?? throw new ArgumentNullException(nameof(name));
-        Aliases = (aliases ?? Array.Empty<string>()).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-        Usage = usage ?? string.Empty;
-        Handler = handler ?? throw new ArgumentNullException(nameof(handler));
-      }
-
-      public IEnumerable<string> AllNames()
-      {
-        yield return Name;
-        foreach (var a in Aliases) yield return a;
-      }
-    }
-
     private const int CommandsPageSize = 4;
 
-    private readonly List<CommandSpec> commands = new List<CommandSpec>();
-    private readonly Dictionary<string, CommandSpec> commandMap = new Dictionary<string, CommandSpec>(StringComparer.OrdinalIgnoreCase);
+    private readonly CommandManager commandManager = new CommandManager();
     private bool commandsInitialized;
-
-    private static readonly Regex CommandRegex = new(@"^\s*(?<verb>\S+)(?:\s+(?<args>.*))?$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     [DllImport("user32.dll")] private static extern bool HideCaret(IntPtr hWnd);
     [DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
@@ -279,27 +252,6 @@ namespace SwimEditor
       VisibleChanged += (s, e) => SyncBarFromInner();
     }
 
-    // Command registration helpers
-    private void RegisterCommand(CommandSpec spec)
-    {
-      if (spec == null) throw new ArgumentNullException(nameof(spec));
-
-      commands.Add(spec);
-
-      foreach (var key in spec.AllNames())
-      {
-        if (string.IsNullOrWhiteSpace(key)) continue;
-        // Last-in-wins to allow intentional overrides, but avoid accidental duplicates:
-        commandMap[key] = spec;
-      }
-    }
-
-    private CommandSpec ResolveCommand(string verb)
-    {
-      if (string.IsNullOrWhiteSpace(verb)) return null;
-      return commandMap.TryGetValue(verb, out var spec) ? spec : null;
-    }
-
     // Ensure built-ins are registered (help is first)
     private void EnsureCommandsRegistered()
     {
@@ -312,7 +264,7 @@ namespace SwimEditor
     {
       // 1) help (first)
       string helpUsage = "help [int: page]\n  Shows available commands, 4 per page. Page is 1-based.";
-      RegisterCommand(new CommandSpec(
+      commandManager.RegisterCommand(
         name: "help",
         aliases: new[] { "h" },
         usage: helpUsage,
@@ -326,42 +278,42 @@ namespace SwimEditor
             return;
 
           int page = (int)values["page"]; // retreive the parsed page argument and use it to show the provied help page
-          ShowHelpPage(page);
-        }));
+          commandManager.WriteHelpPage(page, CommandsPageSize, AppendLine);
+        });
 
       // 2) version
-      RegisterCommand(new CommandSpec(
+      commandManager.RegisterCommand(
         name: "version",
         aliases: new[] { "v", "-v", "--v" },
         usage: "version\n  Prints the editor version.",
         handler: args =>
         {
           AppendLine("Swim Engine Editor 1.0");
-        }));
+        });
 
       // 3) clear
-      RegisterCommand(new CommandSpec(
+      commandManager.RegisterCommand(
         name: "clear",
         aliases: new[] { "cls" },
         usage: "clear\n  Clears the console.",
-        handler: args => { Clear(); }));
+        handler: args => { Clear(); });
 
       // 4) echo
-      RegisterCommand(new CommandSpec(
+      commandManager.RegisterCommand(
         name: "echo",
         aliases: new[] { "print" },
         usage: "echo <text>\n  Prints text to the console.",
         handler: args =>
         {
           AppendLine("> " + (args ?? string.Empty));
-        }));
+        });
 
       // 5) log
-      RegisterCommand(new CommandSpec(
+      commandManager.RegisterCommand(
         name: "log",
         aliases: new[] { "save" },
         usage: "log\n  Opens a save dialog and writes the console to a CSV (timestamped name).",
-        handler: args => { OpenFileDialogueToSaveConsoleLogToCSV(); }));
+        handler: args => { OpenFileDialogueToSaveConsoleLogToCSV(); });
     }
 
     // Access the inner TextBox Poison hosts
@@ -467,78 +419,16 @@ namespace SwimEditor
       }
     }
 
-    private static bool TryParseCommand(string input, out string verb, out string args)
-    {
-      verb = string.Empty;
-      args = string.Empty;
-
-      if (string.IsNullOrWhiteSpace(input))
-      {
-        return false;
-      }
-
-      var m = CommandRegex.Match(input);
-      if (!m.Success)
-      {
-        return false;
-      }
-
-      verb = m.Groups["verb"].Value;
-      args = m.Groups["args"].Success ? m.Groups["args"].Value : string.Empty;
-
-      return true;
-    }
-
-    private void ShowHelpPage(int page)
-    {
-      EnsureCommandsRegistered();
-
-      int total = commands.Count;
-      if (total == 0)
-      {
-        AppendLine("No commands registered.");
-        return;
-      }
-
-      int pageSize = Math.Max(1, CommandsPageSize);
-      int totalPages = (total + pageSize - 1) / pageSize;
-      page = Math.Max(1, Math.Min(page, totalPages));
-
-      int start = (page - 1) * pageSize;
-      int end = Math.Min(start + pageSize, total);
-
-      AppendLine($"Commands (page {page}/{totalPages}):");
-
-      for (int i = start; i < end; i++)
-      {
-        var c = commands[i];
-        string aliases = (c.Aliases.Count > 0) ? $" [{string.Join(", ", c.Aliases)}]" : string.Empty;
-        // One command per line (compact), followed by usage on the next line
-        AppendLine($"  {c.Name}{aliases}");
-        if (!string.IsNullOrWhiteSpace(c.Usage))
-        {
-          foreach (var usageLine in c.Usage.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
-            AppendLine($"    {usageLine}");
-        }
-      }
-
-      if (page < totalPages)
-      {
-        AppendLine($"(Use 'help {page + 1}' for more.)");
-      }
-    }
-
     private void ParseEngineCommand(string command)
     {
-      if (!TryParseCommand(command, out var verb, out var args))
+      if (!commandManager.TryParse(command, out var verb, out var args))
       {
         return;
       }
 
       EnsureCommandsRegistered();
 
-      var spec = ResolveCommand(verb);
-      if (spec == null)
+      if (!commandManager.HasCommand(verb))
       {
         // Not a built-in: leave it to the external pipeline (already invoked in InputKeyDown)
         return;
@@ -546,7 +436,7 @@ namespace SwimEditor
 
       try
       {
-        spec.Handler(args);
+        commandManager.TryInvoke(verb, args);
       }
       catch (Exception ex)
       {

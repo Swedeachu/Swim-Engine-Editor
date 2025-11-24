@@ -22,18 +22,19 @@ namespace SwimEditor
     public List<SceneComponent> Components { get; } = new();
     public List<SceneEntity> Children { get; } = new();
 
-    public JsonElement RawJson { get; set; } // if you want to inspect the full blob later
+    public JsonElement RawJson { get; set; } // raw blob
 
     public override string ToString()
     {
-      // You can later add a "name" field to your JSON and display that instead.
+      // Maybe should use object tag compontent name field if available 
       return $"Entity {Id}";
     }
   }
 
   public class HierarchyDock : DockContent
   {
-    private CrownTreeView treeView;
+    private readonly CrownTreeView treeView;
+    private readonly CommandManager commandManager = new CommandManager();
 
     // MainWindow subscribes and uses node.Tag to drive InspectorDock
     public event Action<object> OnSelectionChanged;
@@ -56,30 +57,79 @@ namespace SwimEditor
       };
 
       Controls.Add(treeView);
+
+      RegisterCommands();
+    }
+
+    private void RegisterCommands()
+    {
+      string usage = "scene load: <json>\n  Loads a scene from JSON into the hierarchy panel.";
+
+      commandManager.RegisterCommand(
+        name: "scene",
+        aliases: Array.Empty<string>(),
+        usage: usage,
+        handler: args =>
+        {
+          HandleSceneCommand(args);
+        }
+      );
+    }
+
+    private void HandleSceneCommand(string args)
+    {
+      if (string.IsNullOrWhiteSpace(args))
+      {
+        return;
+      }
+
+      string trimmed = args.TrimStart();
+
+      const string loadKeyword = "load";
+
+      // Expect things like:
+      // "load: { ...json... }"
+      // "load { ...json... }"
+      if (!trimmed.StartsWith(loadKeyword, StringComparison.OrdinalIgnoreCase))
+      {
+        return;
+      }
+
+      string remainder = trimmed.Substring(loadKeyword.Length);
+
+      if (remainder.StartsWith(":", StringComparison.Ordinal))
+      {
+        remainder = remainder.Substring(1);
+      }
+
+      string json = remainder.TrimStart();
+      if (string.IsNullOrWhiteSpace(json))
+      {
+        return;
+      }
+
+      LoadSceneFromJson(json);
     }
 
     public void Command(string command)
     {
       if (string.IsNullOrEmpty(command))
-        return;
-
-      if (command.StartsWith("scene"))
       {
-        if (command.StartsWith("scene load:"))
-        {
-          LoadScene(command);
-        }
+        return;
+      }
+
+      try
+      {
+        commandManager.TryExecute(command);
+      }
+      catch (Exception ex)
+      {
+        MainWindowForm.Instance?.Console.AppendLog(ex.Message);
       }
     }
 
-    private void LoadScene(string command)
+    private void LoadSceneFromJson(string json)
     {
-      const string prefix = "scene load:";
-
-      if (!command.StartsWith(prefix))
-        return;
-
-      string json = command.Substring(prefix.Length).TrimStart();
       if (string.IsNullOrWhiteSpace(json))
         return;
 
@@ -165,7 +215,9 @@ namespace SwimEditor
       foreach (var elem in entitiesArray.EnumerateArray())
       {
         if (elem.ValueKind != JsonValueKind.Object)
+        {
           continue;
+        }
 
         if (!elem.TryGetProperty("id", out var idProp) ||
             idProp.ValueKind != JsonValueKind.Number ||

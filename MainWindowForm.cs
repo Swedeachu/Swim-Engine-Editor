@@ -1,5 +1,6 @@
 ﻿using WeifenLuo.WinFormsUI.Docking;
 using ReaLTaiizor.Controls;
+using System.ComponentModel;
 
 namespace SwimEditor
 {
@@ -7,17 +8,23 @@ namespace SwimEditor
   public partial class MainWindowForm : Form
   {
 
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public static MainWindowForm? Instance { get; private set; }
+
     private DockPanel dockPanel;
     private ThemeBase theme;
 
-    // these 2 are unused
-    private CrownMenuStrip mainMenu;
-    private CrownToolStrip mainToolbar;
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public HierarchyDock Hierarchy { get; private set; }
 
-    private HierarchyDock hierarchy;
-    private InspectorDock inspector;
-    private GameViewDock gameView;
-    private UtilityDock console;
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public InspectorDock Inspector { get; private set; }
+
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public GameViewDock GameView { get; private set; }
+
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public UtilityDock Console { get; private set; }
 
     private string layoutPath;
 
@@ -29,6 +36,7 @@ namespace SwimEditor
 
     public MainWindowForm()
     {
+      Instance = this;
       InitializeComponent();
       InitializeDockingUi();
       CreateAndShowPanes();
@@ -142,37 +150,37 @@ namespace SwimEditor
     // TODO: serialize each panels width and height on last program close and their position and dock state
     private void CreateAndShowPanes()
     {
-      hierarchy = new HierarchyDock { Text = "Hierarchy" };
-      inspector = new InspectorDock { Text = "Inspector" };
-      gameView = new GameViewDock { Text = "Game View" };
-      console = new UtilityDock { Text = "Utility" };
+      Hierarchy = new HierarchyDock { Text = "Hierarchy" };
+      Inspector = new InspectorDock { Text = "Inspector" };
+      GameView = new GameViewDock { Text = "Game View" };
+      Console = new UtilityDock { Text = "Utility" };
 
-      gameView.Show(dockPanel, DockState.Document);
-      hierarchy.Show(dockPanel, DockState.DockLeft);
-      inspector.Show(dockPanel, DockState.DockRight);
+      GameView.Show(dockPanel, DockState.Document);
+      Hierarchy.Show(dockPanel, DockState.DockLeft);
+      Inspector.Show(dockPanel, DockState.DockRight);
 
       // Give the bottom more verticality before showing console
       dockPanel.DockBottomPortion = 300d; // or 0.35;
-      console.Show(dockPanel, DockState.DockBottom);
+      Console.Show(dockPanel, DockState.DockBottom);
 
-      console.AppendLog("Swim Engine Editor v1.0");
+      Console.AppendLog("Swim Engine Editor v1.0");
       // Make it so game view cout stream callback logs to the console
-      gameView.EngineConsoleLine += line => console.AppendLog(line);
-      gameView.RawEngineMessage += line => hierarchy.Command(line);
+      GameView.EngineConsoleLine += line => Console.AppendLog(line);
+      GameView.RawEngineMessage += line => Hierarchy.Command(line);
 
       // keep inspector synced:
       // - Hierarchy raises with the selected CrownTreeNode
       // - We send the *Tag* (SceneEntity or SceneComponent) to the inspector
-      hierarchy.OnSelectionChanged += obj =>
+      Hierarchy.OnSelectionChanged += obj =>
       {
         if (obj is CrownTreeNode node)
         {
           // Prefer inspecting the underlying data model; fall back to the node itself
-          inspector.SetInspectedObject(node.Tag ?? node);
+          Inspector.SetInspectedObject(node.Tag ?? node);
         }
         else
         {
-          inspector.SetInspectedObject(obj);
+          Inspector.SetInspectedObject(obj);
         }
       };
 
@@ -186,7 +194,7 @@ namespace SwimEditor
       SetActive(stopButton, false);
 
       // When the engine actually starts/stops/pauses, keep the toolbar in sync.
-      gameView.EngineStateChanged += () =>
+      GameView.EngineStateChanged += () =>
       {
         // marshal UI update
         if (InvokeRequired) BeginInvoke(new Action(UpdateTransportUi));
@@ -219,16 +227,16 @@ namespace SwimEditor
     private IDockContent DeserializeDockContent(string persistString)
     {
       if (persistString == typeof(HierarchyDock).FullName)
-        return hierarchy;
+        return Hierarchy;
 
       if (persistString == typeof(InspectorDock).FullName)
-        return inspector;
+        return Inspector;
 
       if (persistString == typeof(GameViewDock).FullName)
-        return gameView;
+        return GameView;
 
       if (persistString == typeof(UtilityDock).FullName)
-        return console;
+        return Console;
 
       return null;
     }
@@ -250,24 +258,24 @@ namespace SwimEditor
 
     private void OnPlayClicked(object? sender, EventArgs e)
     {
-      if (gameView == null || !gameView.IsEngineRunning) return;
+      if (GameView == null || !GameView.IsEngineRunning) return;
 
       // gameView.PlayEngine(); // starts or resumes as needed
-      gameView.GoIntoPlayMode();
+      GameView.GoIntoPlayMode();
       UpdateTransportUi();
     }
 
     private void OnEditClicked(object? sender, EventArgs e)
     {
-      if (gameView == null || !gameView.IsEngineRunning) return;
+      if (GameView == null || !GameView.IsEngineRunning) return;
 
-      if (gameView.IsEngineEditing)
+      if (GameView.IsEngineEditing)
       {
-        gameView.GoIntoGameMode();
+        GameView.GoIntoGameMode();
       }
       else
       {
-        gameView.GoIntoEditMode();
+        GameView.GoIntoEditMode();
       }
 
       UpdateTransportUi();
@@ -275,17 +283,17 @@ namespace SwimEditor
 
     private void OnPauseClicked(object? sender, EventArgs e)
     {
-      if (gameView == null || !gameView.IsEngineRunning) return;
+      if (GameView == null || !GameView.IsEngineRunning) return;
 
-      if (!gameView.IsEnginePaused)
+      if (!GameView.IsEnginePaused)
       {
         // gameView.PauseEngine();
-        gameView.GoIntoPauseMode();
+        GameView.GoIntoPauseMode();
       }
       else
       {
         // gameView.ResumeEngine();
-        gameView?.GoIntoResumedMode();
+        GameView?.GoIntoResumedMode();
       }
 
       UpdateTransportUi();
@@ -293,23 +301,23 @@ namespace SwimEditor
 
     private void OnStopClicked(object? sender, EventArgs e)
     {
-      if (gameView == null || !gameView.IsEngineRunning) return;
+      if (GameView == null || !GameView.IsEngineRunning) return;
 
       // gameView.StopEngine();
-      gameView.GoIntoStoppedMode();
+      GameView.GoIntoStoppedMode();
       UpdateTransportUi();
     }
 
     private void UpdateTransportUi()
     {
-      if (gameView == null)
+      if (GameView == null)
       {
         return;
       }
 
-      bool stopped = gameView.IsEngineStopped;
+      bool stopped = GameView.IsEngineStopped;
 
-      if (gameView.IsEnginePaused)
+      if (GameView.IsEnginePaused)
       {
         pauseButton.Text = "Resume";
       }
@@ -318,7 +326,7 @@ namespace SwimEditor
         pauseButton.Text = "Pause";
       }
 
-      if (gameView.IsEngineEditing)
+      if (GameView.IsEngineEditing)
       {
         editButton.Text = "Game"; // TODO: better text
       }
