@@ -11,6 +11,11 @@ namespace SwimEditor
     public string Name { get; set; }
     public string RawJson { get; set; }  // <- store raw JSON text instead of JsonElement
 
+    // Owning entity + parent info so inspector can show parent on components (e.g. Transform)
+    public int OwnerEntityId { get; set; }
+    public int? OwnerParentId { get; set; }
+    public string OwnerParentName { get; set; }
+
     public override string ToString() => Name ?? "Component";
   }
 
@@ -18,6 +23,9 @@ namespace SwimEditor
   {
     public int Id { get; set; }
     public int? ParentId { get; set; }
+
+    // Filled after we build parent/child relationships so inspector can show "8 (Orbit System)"
+    public string ParentName { get; set; }
 
     public List<SceneComponent> Components { get; } = new();
     public List<SceneEntity> Children { get; } = new();
@@ -29,7 +37,7 @@ namespace SwimEditor
 
     public override string ToString()
     {
-      // Prefer object tag "name" if available
+      // Keep this simple; HierarchyDock or inspector can build richer labels.
       if (!string.IsNullOrWhiteSpace(TagName))
       {
         return TagName;
@@ -48,7 +56,10 @@ namespace SwimEditor
     private CrownTreeNode sceneRootNode;
     private string sceneName = "Scene";
 
+    // Scene model (ID -> entity data)
     private readonly Dictionary<int, SceneEntity> entitiesById = new Dictionary<int, SceneEntity>();
+
+    // UI nodes mapped by entity ID
     private readonly Dictionary<int, CrownTreeNode> entityNodesById = new Dictionary<int, CrownTreeNode>();
 
     // MainWindow subscribes and uses node.Tag to drive InspectorDock
@@ -232,29 +243,54 @@ namespace SwimEditor
           newSceneName = sceneProp.GetString() ?? "Scene";
         }
 
-        List<SceneEntity> roots = ParseEntitiesFromRoot(root);
-
-        // Reset model + tree
-        entitiesById.Clear();
-        entityNodesById.Clear();
-
-        foreach (var e in roots)
-        {
-          CollectEntitiesRecursive(e);
-        }
-
-        treeView.Nodes.Clear();
-
         sceneName = newSceneName;
-        sceneRootNode = new CrownTreeNode(sceneName);
-        treeView.Nodes.Add(sceneRootNode);
 
-        foreach (var entity in roots)
+        // Rebuild the model from the "entities" array
+        entitiesById.Clear();
+
+        JsonElement entitiesArray;
+
+        if (root.ValueKind == JsonValueKind.Object &&
+            root.TryGetProperty("entities", out var eProp) &&
+            eProp.ValueKind == JsonValueKind.Array)
         {
-          AddEntityHierarchy(entity, sceneRootNode);
+          entitiesArray = eProp;
+        }
+        else if (root.ValueKind == JsonValueKind.Array)
+        {
+          // Fallback: treat root itself as the array
+          entitiesArray = root;
+        }
+        else
+        {
+          // No entities; just clear UI
+          treeView.Nodes.Clear();
+          entityNodesById.Clear();
+
+          sceneRootNode = new CrownTreeNode(sceneName);
+          treeView.Nodes.Add(sceneRootNode);
+          sceneRootNode.Expanded = true;
+          return;
         }
 
-        sceneRootNode.Expanded = true;
+        foreach (var elem in entitiesArray.EnumerateArray())
+        {
+          if (elem.ValueKind != JsonValueKind.Object)
+          {
+            continue;
+          }
+
+          var entity = BuildSceneEntityFromJson(elem);
+          if (entity == null)
+          {
+            continue;
+          }
+
+          entitiesById[entity.Id] = entity;
+        }
+
+        // Full load; we don't care about preserving previous UI state.
+        RebuildTreeFromEntities(preserveState: false);
       }
       catch (Exception e)
       {
@@ -292,10 +328,6 @@ namespace SwimEditor
             sceneProp.ValueKind == JsonValueKind.String)
         {
           sceneName = sceneProp.GetString() ?? sceneName;
-          if (sceneRootNode != null)
-          {
-            sceneRootNode.Text = sceneName;
-          }
         }
 
         // Created entities
@@ -328,17 +360,20 @@ namespace SwimEditor
 
             if (elem.ValueKind == JsonValueKind.Number && elem.TryGetInt32(out id))
             {
-              DestroyEntityById(id);
+              entitiesById.Remove(id);
             }
             else if (elem.ValueKind == JsonValueKind.Object &&
                      elem.TryGetProperty("id", out var idProp) &&
                      idProp.ValueKind == JsonValueKind.Number &&
                      idProp.TryGetInt32(out id))
             {
-              DestroyEntityById(id);
+              entitiesById.Remove(id);
             }
           }
         }
+
+        // Now rebuild hierarchy from the updated model, preserving UX where possible.
+        RebuildTreeFromEntities(preserveState: true);
       }
       catch (Exception e)
       {
@@ -358,6 +393,9 @@ namespace SwimEditor
         using JsonDocument doc = JsonDocument.Parse(json);
         JsonElement elem = doc.RootElement;
         UpsertEntityFromElement(elem);
+
+        // Single-entity create/update; rebuild to keep structure correct.
+        RebuildTreeFromEntities(preserveState: true);
       }
       catch (Exception e)
       {
@@ -397,45 +435,6 @@ namespace SwimEditor
           existing.Components.Add(c);
         }
       }
-
-      // Ensure we have a node
-      if (!entityNodesById.TryGetValue(existing.Id, out CrownTreeNode node))
-      {
-        node = new CrownTreeNode(existing.ToString())
-        {
-          Tag = existing
-        };
-        entityNodesById[existing.Id] = node;
-        AttachEntityNodeToParent(existing, node);
-      }
-      else
-      {
-        node.Text = existing.ToString();
-        node.Tag = existing;
-
-        // Re-parent if needed
-        AttachEntityNodeToParent(existing, node);
-      }
-
-      // Replace component nodes under this entity node
-      for (int i = node.Nodes.Count - 1; i >= 0; i--)
-      {
-        if (node.Nodes[i].Tag is SceneComponent)
-        {
-          node.Nodes.RemoveAt(i);
-        }
-      }
-
-      foreach (var comp in existing.Components)
-      {
-        var compNode = new CrownTreeNode(comp.Name ?? "Component")
-        {
-          Tag = comp
-        };
-        node.Nodes.Add(compNode);
-      }
-
-      node.Expanded = true;
     }
 
     private void DestroyEntityFromJson(string json)
@@ -462,103 +461,15 @@ namespace SwimEditor
           return;
         }
 
-        DestroyEntityById(id);
+        entitiesById.Remove(id);
+
+        // Rebuild after destroy so children are re-parented correctly
+        RebuildTreeFromEntities(preserveState: true);
       }
       catch (Exception e)
       {
         MainWindowForm.Instance?.Console.AppendLog(e.Message);
       }
-    }
-
-    private void DestroyEntityById(int id)
-    {
-      entitiesById.Remove(id);
-
-      if (entityNodesById.TryGetValue(id, out CrownTreeNode node))
-      {
-        entityNodesById.Remove(id);
-        var parent = node.ParentNode;
-        if (parent != null)
-        {
-          parent.Nodes.Remove(node);
-        }
-        else
-        {
-          treeView.Nodes.Remove(node);
-        }
-      }
-    }
-
-    /// <summary>
-    /// Parse SandBox-style scene JSON into a list of root entities.
-    /// Expected root shape:
-    /// {
-    ///   "scene": "SandBox",
-    ///   "entities": [
-    ///     { "id": 33, "parent": null, "transform":{...}, "material":{...} },
-    ///     { "id": 32, "parent": 33,  "transform":{...} },
-    ///     ...
-    ///   ]
-    /// }
-    /// </summary>
-    private List<SceneEntity> ParseEntitiesFromRoot(JsonElement root)
-    {
-      var entitiesByTempId = new Dictionary<int, SceneEntity>();
-
-      // Get entities array
-      JsonElement entitiesArray;
-
-      if (root.ValueKind == JsonValueKind.Object &&
-          root.TryGetProperty("entities", out var eProp) &&
-          eProp.ValueKind == JsonValueKind.Array)
-      {
-        entitiesArray = eProp;
-      }
-      else if (root.ValueKind == JsonValueKind.Array)
-      {
-        // Fallback: treat the root itself as an array of entities
-        entitiesArray = root;
-      }
-      else
-      {
-        // Unknown shape, return empty
-        return new List<SceneEntity>();
-      }
-
-      // First pass: create all entities and collect components (transform, material, etc.)
-      foreach (var elem in entitiesArray.EnumerateArray())
-      {
-        if (elem.ValueKind != JsonValueKind.Object)
-        {
-          continue;
-        }
-
-        SceneEntity entity = BuildSceneEntityFromJson(elem);
-        if (entity == null)
-        {
-          continue;
-        }
-
-        entitiesByTempId[entity.Id] = entity;
-      }
-
-      // Second pass: hook up children by ParentId
-      var roots = new List<SceneEntity>();
-
-      foreach (var ent in entitiesByTempId.Values)
-      {
-        if (ent.ParentId.HasValue && entitiesByTempId.TryGetValue(ent.ParentId.Value, out var parent))
-        {
-          parent.Children.Add(ent);
-        }
-        else
-        {
-          // Parent null or missing -> root-level entity under scene node
-          roots.Add(ent);
-        }
-      }
-
-      return roots;
     }
 
     private SceneEntity BuildSceneEntityFromJson(JsonElement elem)
@@ -576,12 +487,25 @@ namespace SwimEditor
       }
 
       int? parentId = null;
+
+      // More defensive parent parsing: number or string; treat 0 or self as "no parent".
       if (elem.TryGetProperty("parent", out var parentProp))
       {
         if (parentProp.ValueKind == JsonValueKind.Number &&
-            parentProp.TryGetInt32(out var pid))
+            parentProp.TryGetInt32(out var pidNum))
         {
-          parentId = pid;
+          if (pidNum > 0 && pidNum != id)
+          {
+            parentId = pidNum;
+          }
+        }
+        else if (parentProp.ValueKind == JsonValueKind.String)
+        {
+          var s = parentProp.GetString();
+          if (int.TryParse(s, out var pidStr) && pidStr > 0 && pidStr != id)
+          {
+            parentId = pidStr;
+          }
         }
         else if (parentProp.ValueKind == JsonValueKind.Null)
         {
@@ -637,19 +561,137 @@ namespace SwimEditor
       return entity;
     }
 
-    private void CollectEntitiesRecursive(SceneEntity entity)
+    /// <summary>
+    /// Builds the entire tree from entitiesById using ParentId relationships.
+    /// Also fills SceneEntity.ParentName so the inspector can show "id (Name)".
+    /// Preserves:
+    ///   - Expanded entities (by ID)
+    ///   - Selected entity (and scrolls it back into view via EnsureVisible)
+    /// </summary>
+    private void RebuildTreeFromEntities(bool preserveState)
     {
-      entitiesById[entity.Id] = entity;
+      // Snapshot current expansion and selection before we blow away the tree.
+      HashSet<int> expandedIds = new HashSet<int>();
+      int? selectedId = null;
 
-      foreach (var child in entity.Children)
+      if (preserveState && sceneRootNode != null)
       {
-        CollectEntitiesRecursive(child);
+        foreach (var kvp in entityNodesById)
+        {
+          var node = kvp.Value;
+          if (node != null && node.Expanded)
+          {
+            expandedIds.Add(kvp.Key);
+          }
+        }
+
+        var selectedNode = treeView.SelectedNodes.LastOrDefault();
+        if (selectedNode != null && selectedNode.Tag is SceneEntity selectedEntity)
+        {
+          selectedId = selectedEntity.Id;
+        }
+      }
+
+      // Clear old UI mappings
+      treeView.Nodes.Clear();
+      entityNodesById.Clear();
+
+      // Rebuild parent/child relationships in the model first.
+      foreach (var entity in entitiesById.Values)
+      {
+        entity.Children.Clear();
+      }
+
+      var roots = new List<SceneEntity>();
+
+      foreach (var entity in entitiesById.Values)
+      {
+        if (entity.ParentId.HasValue &&
+            entity.ParentId.Value != 0 &&
+            entity.ParentId.Value != entity.Id &&
+            entitiesById.TryGetValue(entity.ParentId.Value, out var parent))
+        {
+          parent.Children.Add(entity);
+        }
+        else
+        {
+          // Parent null, 0, self, or missing -> root-level entity under scene node
+          roots.Add(entity);
+        }
+      }
+
+      // Fill ParentName for inspector (e.g., "Orbit System")
+      foreach (var entity in entitiesById.Values)
+      {
+        if (entity.ParentId.HasValue &&
+            entity.ParentId.Value != 0 &&
+            entitiesById.TryGetValue(entity.ParentId.Value, out var parent))
+        {
+          entity.ParentName = !string.IsNullOrWhiteSpace(parent.TagName)
+            ? parent.TagName
+            : $"Entity {parent.Id}";
+        }
+        else
+        {
+          entity.ParentName = null;
+        }
+      }
+
+      // Recreate root node
+      sceneRootNode = new CrownTreeNode(sceneName);
+      treeView.Nodes.Add(sceneRootNode);
+
+      // Add all roots and their children recursively
+      foreach (var entity in roots)
+      {
+        AddEntityHierarchy(entity, sceneRootNode);
+      }
+
+      sceneRootNode.Expanded = true;
+
+      // Restore expansion
+      if (preserveState && expandedIds.Count > 0)
+      {
+        foreach (var id in expandedIds)
+        {
+          if (entityNodesById.TryGetValue(id, out var node))
+          {
+            node.Expanded = true;
+          }
+        }
+      }
+
+      // Restore selection and scroll to it
+      if (preserveState && selectedId.HasValue &&
+          entityNodesById.TryGetValue(selectedId.Value, out var selectedNodeNew))
+      {
+        treeView.SelectNode(selectedNodeNew);
+        try
+        {
+          treeView.EnsureVisible();
+        }
+        catch
+        {
+          // Ignore any EnsureVisible issues
+        }
       }
     }
 
     /// <summary>
+    /// Builds a human-readable label for an entity (used internally if needed).
+    /// </summary>
+    private string GetEntityLabel(SceneEntity entity)
+    {
+      string baseName = !string.IsNullOrWhiteSpace(entity.TagName)
+        ? entity.TagName
+        : $"Entity {entity.Id}";
+
+      return baseName;
+    }
+
+    /// <summary>
     /// Unity-like placement:
-    /// SandBox
+    /// SceneName
     ///   Entity 33
     ///     Transform
     ///     Material
@@ -658,7 +700,7 @@ namespace SwimEditor
     /// </summary>
     private void AddEntityHierarchy(SceneEntity entity, CrownTreeNode parentNode)
     {
-      string label = entity.ToString();
+      string label = GetEntityLabel(entity);
 
       var entityNode = new CrownTreeNode(label)
       {
@@ -667,6 +709,14 @@ namespace SwimEditor
       parentNode.Nodes.Add(entityNode);
 
       entityNodesById[entity.Id] = entityNode;
+
+      // Update component ownership + parent info so inspector can display it.
+      foreach (var comp in entity.Components)
+      {
+        comp.OwnerEntityId = entity.Id;
+        comp.OwnerParentId = entity.ParentId;
+        comp.OwnerParentName = entity.ParentName;
+      }
 
       // Components directly under the entity
       foreach (var comp in entity.Components)
@@ -684,42 +734,8 @@ namespace SwimEditor
         AddEntityHierarchy(child, entityNode);
       }
 
+      // Keep entities expanded by default when first built
       entityNode.Expanded = true;
-    }
-
-    private void AttachEntityNodeToParent(SceneEntity entity, CrownTreeNode node)
-    {
-      // Remove from old parent
-      var currentParent = node.ParentNode;
-      if (currentParent != null)
-      {
-        currentParent.Nodes.Remove(node);
-      }
-      else
-      {
-        treeView.Nodes.Remove(node);
-      }
-
-      CrownTreeNode parentNode = null;
-
-      if (entity.ParentId.HasValue && entityNodesById.TryGetValue(entity.ParentId.Value, out var existingParentNode))
-      {
-        parentNode = existingParentNode;
-      }
-      else if (sceneRootNode != null)
-      {
-        parentNode = sceneRootNode;
-      }
-
-      if (parentNode != null)
-      {
-        parentNode.Nodes.Add(node);
-      }
-      else
-      {
-        // Fallback if we somehow have no scene root yet
-        treeView.Nodes.Add(node);
-      }
     }
 
   } // class HierarchyDock

@@ -70,7 +70,12 @@ namespace SwimEditor
 
         if (nameLower == "transform")
         {
-          propertyGrid.SelectedObject = TransformInspectorModel.FromJson(comp.RawJson);
+          // Show parent as "8 (Orbit System)" or blank if none.
+          propertyGrid.SelectedObject = TransformInspectorModel.FromJson(
+            comp.RawJson,
+            comp.OwnerParentId,
+            comp.OwnerParentName
+          );
           return;
         }
 
@@ -85,10 +90,10 @@ namespace SwimEditor
         return;
       }
 
-      // Entity -> show its C# properties (Id, ParentId, etc.)
+      // Entity -> use a view model so we can show "8 (Orbit System)" nicely
       if (obj is SceneEntity ent)
       {
-        propertyGrid.SelectedObject = ent;
+        propertyGrid.SelectedObject = EntityInspectorModel.FromEntity(ent);
         return;
       }
 
@@ -97,10 +102,59 @@ namespace SwimEditor
     }
 
     // ------------------------------------------------------------------
+    // Strongly-typed ENTITY inspector
+    // ------------------------------------------------------------------
+    public sealed class EntityInspectorModel
+    {
+      [Category("Entity")]
+      [DisplayName("Id")]
+      public int Id { get; set; }
+
+      [Category("Entity")]
+      [DisplayName("Name")]
+      public string Name { get; set; }
+
+      // Example: "8 (Orbit System)" or "" if no parent.
+      [Category("Entity")]
+      [DisplayName("Parent")]
+      public string Parent { get; set; }
+
+      public static EntityInspectorModel FromEntity(SceneEntity ent)
+      {
+        var model = new EntityInspectorModel
+        {
+          Id = ent.Id,
+          Name = !string.IsNullOrWhiteSpace(ent.TagName)
+            ? ent.TagName
+            : $"Entity {ent.Id}"
+        };
+
+        if (ent.ParentId.HasValue && ent.ParentId.Value != 0)
+        {
+          string parentBase = !string.IsNullOrWhiteSpace(ent.ParentName)
+            ? ent.ParentName
+            : $"Entity {ent.ParentId.Value}";
+
+          model.Parent = $"{ent.ParentId.Value} ({parentBase})";
+        }
+        else
+        {
+          model.Parent = string.Empty;
+        }
+
+        return model;
+      }
+    }
+
+    // ------------------------------------------------------------------
     // Strongly-typed TRANSFORM inspector
     // ------------------------------------------------------------------
     public sealed class TransformInspectorModel
     {
+      [Category("Transform")]
+      [DisplayName("Parent")]
+      public string Parent { get; set; }
+
       [Category("Transform")]
       [DisplayName("Position X")]
       public float PositionX { get; set; }
@@ -137,9 +191,23 @@ namespace SwimEditor
       [DisplayName("Scale Z")]
       public float ScaleZ { get; set; } = 1.0f;
 
-      public static TransformInspectorModel FromJson(string rawJson)
+      public static TransformInspectorModel FromJson(string rawJson, int? parentId = null, string parentName = null)
       {
         var model = new TransformInspectorModel();
+
+        // Parent as "8 (Orbit System)" or blank if none.
+        if (parentId.HasValue && parentId.Value != 0)
+        {
+          string parentBase = !string.IsNullOrWhiteSpace(parentName)
+            ? parentName
+            : $"Entity {parentId.Value}";
+
+          model.Parent = $"{parentId.Value} ({parentBase})";
+        }
+        else
+        {
+          model.Parent = string.Empty;
+        }
 
         if (string.IsNullOrWhiteSpace(rawJson))
           return model;
