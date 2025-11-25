@@ -26,7 +26,7 @@ namespace SwimEditor
 
     public override string ToString()
     {
-      // Maybe should use object tag compontent name field if available 
+      // Maybe should use object tag component name field if available 
       return $"Entity {Id}";
     }
   }
@@ -34,7 +34,14 @@ namespace SwimEditor
   public class HierarchyDock : DockContent
   {
     private readonly CrownTreeView treeView;
-    private readonly CommandManager commandManager = new CommandManager();
+
+    private CommandManager CommandManager = new CommandManager();
+
+    private CrownTreeNode sceneRootNode;
+    private string sceneName = "Scene";
+
+    private readonly Dictionary<int, SceneEntity> entitiesById = new Dictionary<int, SceneEntity>();
+    private readonly Dictionary<int, CrownTreeNode> entityNodesById = new Dictionary<int, CrownTreeNode>();
 
     // MainWindow subscribes and uses node.Tag to drive InspectorDock
     public event Action<object> OnSelectionChanged;
@@ -63,11 +70,24 @@ namespace SwimEditor
 
     private void RegisterCommands()
     {
-      string usage = "scene load: <json>\n  Loads a scene from JSON into the hierarchy panel.";
+      if (CommandManager == null)
+      {
+        return;
+      }
 
-      commandManager.RegisterCommand(
+      string usage =
+        "scene load: <json>\n" +
+        "  Loads a scene from JSON into the hierarchy panel.\n" +
+        "scene entityCreate: <json>\n" +
+        "  Creates/initializes a single entity in the hierarchy.\n" +
+        "scene entityUpdate: <json>\n" +
+        "  Updates an existing entity’s parent/components.\n" +
+        "scene entityDestroy: <json>\n" +
+        "  Destroys an entity from the hierarchy.";
+
+      CommandManager.RegisterCommand(
         name: "scene",
-        aliases: Array.Empty<string>(),
+        aliases: System.Array.Empty<string>(),
         usage: usage,
         handler: args =>
         {
@@ -84,31 +104,70 @@ namespace SwimEditor
       }
 
       string trimmed = args.TrimStart();
-
-      const string loadKeyword = "load";
-
-      // Expect things like:
-      // "load: { ...json... }"
-      // "load { ...json... }"
-      if (!trimmed.StartsWith(loadKeyword, StringComparison.OrdinalIgnoreCase))
+      if (trimmed.Length == 0)
       {
         return;
       }
 
-      string remainder = trimmed.Substring(loadKeyword.Length);
+      // Parse first token up to whitespace or ':' as the subcommand keyword.
+      int i = 0;
+      while (i < trimmed.Length && !char.IsWhiteSpace(trimmed[i]) && trimmed[i] != ':')
+      {
+        i++;
+      }
 
-      if (remainder.StartsWith(":", StringComparison.Ordinal))
+      string keyword = trimmed.Substring(0, i);
+      string remainder = trimmed.Substring(i);
+
+      if (remainder.StartsWith(":", System.StringComparison.Ordinal))
       {
         remainder = remainder.Substring(1);
       }
 
-      string json = remainder.TrimStart();
-      if (string.IsNullOrWhiteSpace(json))
+      string payload = remainder.TrimStart();
+      if (string.IsNullOrWhiteSpace(keyword))
       {
         return;
       }
 
-      LoadSceneFromJson(json);
+      switch (keyword.ToLowerInvariant())
+      {
+        case "load":
+        {
+          if (!string.IsNullOrWhiteSpace(payload))
+          {
+            LoadSceneFromJson(payload);
+          }
+          break;
+        }
+
+        case "entitycreate":
+        {
+          if (!string.IsNullOrWhiteSpace(payload))
+          {
+            UpsertEntityFromJson(payload);
+          }
+          break;
+        }
+
+        case "entityupdate":
+        {
+          if (!string.IsNullOrWhiteSpace(payload))
+          {
+            UpsertEntityFromJson(payload);
+          }
+          break;
+        }
+
+        case "entitydestroy":
+        {
+          if (!string.IsNullOrWhiteSpace(payload))
+          {
+            DestroyEntityFromJson(payload);
+          }
+          break;
+        }
+      }
     }
 
     public void Command(string command)
@@ -118,20 +177,27 @@ namespace SwimEditor
         return;
       }
 
+      if (CommandManager == null)
+      {
+        return;
+      }
+
       try
       {
-        commandManager.TryExecute(command);
+        CommandManager.TryExecute(command);
       }
-      catch (Exception ex)
+      catch (Exception e)
       {
-        MainWindowForm.Instance?.Console.AppendLog(ex.Message);
+        MainWindowForm.Instance?.Console.AppendLog(e.Message);
       }
     }
 
     private void LoadSceneFromJson(string json)
     {
       if (string.IsNullOrWhiteSpace(json))
+      {
         return;
+      }
 
       try
       {
@@ -139,39 +205,181 @@ namespace SwimEditor
         JsonElement root = doc.RootElement;
 
         // Scene name from "scene" property, default to "Scene"
-        string sceneName = "Scene";
+        string newSceneName = "Scene";
         if (root.ValueKind == JsonValueKind.Object &&
             root.TryGetProperty("scene", out var sceneProp) &&
             sceneProp.ValueKind == JsonValueKind.String)
         {
-          sceneName = sceneProp.GetString() ?? "Scene";
+          newSceneName = sceneProp.GetString() ?? "Scene";
         }
 
-        // Parse entities from "entities" array (SandBox.json layout)
         List<SceneEntity> roots = ParseEntitiesFromRoot(root);
 
-        // Build tree view
+        // Reset model + tree
+        entitiesById.Clear();
+        entityNodesById.Clear();
+
+        foreach (var e in roots)
+        {
+          CollectEntitiesRecursive(e);
+        }
+
         treeView.Nodes.Clear();
 
-        var sceneNode = new CrownTreeNode(sceneName);
-        treeView.Nodes.Add(sceneNode);
+        sceneName = newSceneName;
+        sceneRootNode = new CrownTreeNode(sceneName);
+        treeView.Nodes.Add(sceneRootNode);
 
         foreach (var entity in roots)
         {
-          AddEntityNodeRecursive(entity, sceneNode);
+          AddEntityHierarchy(entity, sceneRootNode);
         }
 
-        sceneNode.Expanded = true;
+        sceneRootNode.Expanded = true;
       }
-      catch (Exception ex)
+      catch (Exception e)
       {
+        entitiesById.Clear();
+        entityNodesById.Clear();
         treeView.Nodes.Clear();
 
         var errorRoot = new CrownTreeNode("Scene (Failed to load)");
-        errorRoot.Nodes.Add(new CrownTreeNode(ex.Message));
+        errorRoot.Nodes.Add(new CrownTreeNode(e.Message));
         treeView.Nodes.Add(errorRoot);
 
         errorRoot.Expanded = true;
+      }
+    }
+
+    private void UpsertEntityFromJson(string json)
+    {
+      if (string.IsNullOrWhiteSpace(json))
+      {
+        return;
+      }
+
+      try
+      {
+        using JsonDocument doc = JsonDocument.Parse(json);
+        JsonElement elem = doc.RootElement;
+        if (elem.ValueKind != JsonValueKind.Object)
+        {
+          return;
+        }
+
+        SceneEntity incoming = BuildSceneEntityFromJson(elem);
+        if (incoming == null)
+        {
+          return;
+        }
+
+        if (!entitiesById.TryGetValue(incoming.Id, out SceneEntity existing))
+        {
+          // New entity
+          existing = incoming;
+          entitiesById[incoming.Id] = existing;
+        }
+        else
+        {
+          // Update existing entity's basic metadata + components
+          existing.ParentId = incoming.ParentId;
+          existing.RawJson = incoming.RawJson;
+
+          existing.Components.Clear();
+          foreach (var c in incoming.Components)
+          {
+            existing.Components.Add(c);
+          }
+        }
+
+        // Ensure we have a node
+        if (!entityNodesById.TryGetValue(existing.Id, out CrownTreeNode node))
+        {
+          node = new CrownTreeNode($"Entity {existing.Id}")
+          {
+            Tag = existing
+          };
+          entityNodesById[existing.Id] = node;
+          AttachEntityNodeToParent(existing, node);
+        }
+        else
+        {
+          node.Text = $"Entity {existing.Id}";
+          node.Tag = existing;
+
+          // Re-parent if needed
+          AttachEntityNodeToParent(existing, node);
+        }
+
+        // Replace component nodes under this entity node
+        for (int i = node.Nodes.Count - 1; i >= 0; i--)
+        {
+          if (node.Nodes[i].Tag is SceneComponent)
+          {
+            node.Nodes.RemoveAt(i);
+          }
+        }
+
+        foreach (var comp in existing.Components)
+        {
+          var compNode = new CrownTreeNode(comp.Name ?? "Component")
+          {
+            Tag = comp
+          };
+          node.Nodes.Add(compNode);
+        }
+
+        node.Expanded = true;
+      }
+      catch (Exception e)
+      {
+        MainWindowForm.Instance?.Console.AppendLog(e.Message);
+      }
+    }
+
+    private void DestroyEntityFromJson(string json)
+    {
+      if (string.IsNullOrWhiteSpace(json))
+      {
+        return;
+      }
+
+      try
+      {
+        using JsonDocument doc = JsonDocument.Parse(json);
+        JsonElement elem = doc.RootElement;
+
+        if (elem.ValueKind != JsonValueKind.Object)
+        {
+          return;
+        }
+
+        if (!elem.TryGetProperty("id", out var idProp) ||
+            idProp.ValueKind != JsonValueKind.Number ||
+            !idProp.TryGetInt32(out int id))
+        {
+          return;
+        }
+
+        entitiesById.Remove(id);
+
+        if (entityNodesById.TryGetValue(id, out CrownTreeNode node))
+        {
+          entityNodesById.Remove(id);
+          var parent = node.ParentNode;
+          if (parent != null)
+          {
+            parent.Nodes.Remove(node);
+          }
+          else
+          {
+            treeView.Nodes.Remove(node);
+          }
+        }
+      }
+      catch (Exception e)
+      {
+        MainWindowForm.Instance?.Console.AppendLog(e.Message);
       }
     }
 
@@ -189,7 +397,7 @@ namespace SwimEditor
     /// </summary>
     private List<SceneEntity> ParseEntitiesFromRoot(JsonElement root)
     {
-      var entitiesById = new Dictionary<int, SceneEntity>();
+      var entitiesByTempId = new Dictionary<int, SceneEntity>();
 
       // Get entities array
       JsonElement entitiesArray;
@@ -219,56 +427,21 @@ namespace SwimEditor
           continue;
         }
 
-        if (!elem.TryGetProperty("id", out var idProp) ||
-            idProp.ValueKind != JsonValueKind.Number ||
-            !idProp.TryGetInt32(out var id))
+        SceneEntity entity = BuildSceneEntityFromJson(elem);
+        if (entity == null)
         {
-          continue; // invalid entity, skip
+          continue;
         }
 
-        int? parentId = null;
-        if (elem.TryGetProperty("parent", out var parentProp) &&
-            parentProp.ValueKind == JsonValueKind.Number &&
-            parentProp.TryGetInt32(out var pid))
-        {
-          parentId = pid;
-        }
-
-        var entity = new SceneEntity
-        {
-          Id = id,
-          ParentId = parentId,
-          RawJson = elem
-        };
-
-        // Treat any object-valued property (except "id" / "parent") as a component
-        foreach (var prop in elem.EnumerateObject())
-        {
-          if (prop.NameEquals("id") || prop.NameEquals("parent"))
-            continue;
-
-          if (prop.Value.ValueKind == JsonValueKind.Object)
-          {
-            // Name like "Transform", "Material" etc.
-            string friendlyName = char.ToUpperInvariant(prop.Name[0]) + prop.Name.Substring(1);
-            var comp = new SceneComponent
-            {
-              Name = friendlyName,
-              RawJson = prop.Value.GetRawText()
-            };
-            entity.Components.Add(comp);
-          }
-        }
-
-        entitiesById[id] = entity;
+        entitiesByTempId[entity.Id] = entity;
       }
 
       // Second pass: hook up children by ParentId
       var roots = new List<SceneEntity>();
 
-      foreach (var ent in entitiesById.Values)
+      foreach (var ent in entitiesByTempId.Values)
       {
-        if (ent.ParentId.HasValue && entitiesById.TryGetValue(ent.ParentId.Value, out var parent))
+        if (ent.ParentId.HasValue && entitiesByTempId.TryGetValue(ent.ParentId.Value, out var parent))
         {
           parent.Children.Add(ent);
         }
@@ -282,6 +455,75 @@ namespace SwimEditor
       return roots;
     }
 
+    private SceneEntity BuildSceneEntityFromJson(JsonElement elem)
+    {
+      if (elem.ValueKind != JsonValueKind.Object)
+      {
+        return null;
+      }
+
+      if (!elem.TryGetProperty("id", out var idProp) ||
+          idProp.ValueKind != JsonValueKind.Number ||
+          !idProp.TryGetInt32(out var id))
+      {
+        return null; // invalid entity
+      }
+
+      int? parentId = null;
+      if (elem.TryGetProperty("parent", out var parentProp))
+      {
+        if (parentProp.ValueKind == JsonValueKind.Number &&
+            parentProp.TryGetInt32(out var pid))
+        {
+          parentId = pid;
+        }
+        else if (parentProp.ValueKind == JsonValueKind.Null)
+        {
+          parentId = null;
+        }
+      }
+
+      var entity = new SceneEntity
+      {
+        Id = id,
+        ParentId = parentId,
+        RawJson = elem
+      };
+
+      // Treat any object-valued property (except "id" / "parent") as a component
+      foreach (var prop in elem.EnumerateObject())
+      {
+        if (prop.NameEquals("id") || prop.NameEquals("parent"))
+        {
+          continue;
+        }
+
+        if (prop.Value.ValueKind == JsonValueKind.Object)
+        {
+          // Name like "Transform", "Material" etc.
+          string friendlyName = char.ToUpperInvariant(prop.Name[0]) + prop.Name.Substring(1);
+          var comp = new SceneComponent
+          {
+            Name = friendlyName,
+            RawJson = prop.Value.GetRawText()
+          };
+          entity.Components.Add(comp);
+        }
+      }
+
+      return entity;
+    }
+
+    private void CollectEntitiesRecursive(SceneEntity entity)
+    {
+      entitiesById[entity.Id] = entity;
+
+      foreach (var child in entity.Children)
+      {
+        CollectEntitiesRecursive(child);
+      }
+    }
+
     /// <summary>
     /// Unity-like placement:
     /// SandBox
@@ -291,7 +533,7 @@ namespace SwimEditor
     ///     Entity 32
     ///       Transform
     /// </summary>
-    private void AddEntityNodeRecursive(SceneEntity entity, CrownTreeNode parentNode)
+    private void AddEntityHierarchy(SceneEntity entity, CrownTreeNode parentNode)
     {
       string label = $"Entity {entity.Id}";
 
@@ -300,6 +542,8 @@ namespace SwimEditor
         Tag = entity
       };
       parentNode.Nodes.Add(entityNode);
+
+      entityNodesById[entity.Id] = entityNode;
 
       // Components directly under the entity
       foreach (var comp in entity.Components)
@@ -314,10 +558,45 @@ namespace SwimEditor
       // Then child entities
       foreach (var child in entity.Children)
       {
-        AddEntityNodeRecursive(child, entityNode);
+        AddEntityHierarchy(child, entityNode);
       }
 
       entityNode.Expanded = true;
+    }
+
+    private void AttachEntityNodeToParent(SceneEntity entity, CrownTreeNode node)
+    {
+      // Remove from old parent
+      var currentParent = node.ParentNode;
+      if (currentParent != null)
+      {
+        currentParent.Nodes.Remove(node);
+      }
+      else
+      {
+        treeView.Nodes.Remove(node);
+      }
+
+      CrownTreeNode parentNode = null;
+
+      if (entity.ParentId.HasValue && entityNodesById.TryGetValue(entity.ParentId.Value, out var existingParentNode))
+      {
+        parentNode = existingParentNode;
+      }
+      else if (sceneRootNode != null)
+      {
+        parentNode = sceneRootNode;
+      }
+
+      if (parentNode != null)
+      {
+        parentNode.Nodes.Add(node);
+      }
+      else
+      {
+        // Fallback if we somehow have no scene root yet
+        treeView.Nodes.Add(node);
+      }
     }
 
   } // class HierarchyDock

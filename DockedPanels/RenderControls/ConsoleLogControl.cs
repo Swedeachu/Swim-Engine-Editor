@@ -21,7 +21,6 @@ namespace SwimEditor
     private const int CommandsPageSize = 4;
 
     private readonly CommandManager commandManager = new CommandManager();
-    private bool commandsInitialized;
 
     [DllImport("user32.dll")] private static extern bool HideCaret(IntPtr hWnd);
     [DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
@@ -41,7 +40,7 @@ namespace SwimEditor
     private readonly System.Windows.Forms.Panel inputBar;    // holds separator + prompt + textbox
     private readonly System.Windows.Forms.Panel inputSep;    // 1px divider
 
-    private readonly System.Collections.Generic.List<string> history = new System.Collections.Generic.List<string>();
+    private readonly List<string> history = new List<string>();
     private int historyIndex = -1;
 
     private int maxLines = 5000;
@@ -250,14 +249,8 @@ namespace SwimEditor
       // keep bar synced on control-level size changes too
       Resize += (s, e) => SyncBarFromInner();
       VisibleChanged += (s, e) => SyncBarFromInner();
-    }
 
-    // Ensure built-ins are registered (help is first)
-    private void EnsureCommandsRegistered()
-    {
-      if (commandsInitialized) return;
       RegisterBuiltInCommands();
-      commandsInitialized = true;
     }
 
     private void RegisterBuiltInCommands()
@@ -425,8 +418,6 @@ namespace SwimEditor
       {
         return;
       }
-
-      EnsureCommandsRegistered();
 
       if (!commandManager.HasCommand(verb))
       {
