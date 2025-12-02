@@ -745,7 +745,12 @@ namespace SwimEditor
 
     private void OnEngineMessageReceived(ulong channel, string text)
     {
-      EngineConsoleLine?.Invoke($"[Message from Engine to Editor: {channel}] {text}");
+      // For now we only want to log things to console on channel 1, everything else is command noise 
+      if (channel == 1)
+      {
+        EngineConsoleLine?.Invoke($"[Message from Engine to Editor: {channel}] {text}");
+      }
+      // We always try to invoke it as a command though
       RawEngineMessage?.Invoke(text);
 
       // This should be parsed elsewhere in MainWindowForm to be able to talk to the other panels such as the hierarchy 

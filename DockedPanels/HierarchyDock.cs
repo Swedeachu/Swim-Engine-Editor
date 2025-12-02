@@ -72,6 +72,8 @@ namespace SwimEditor
         Dock = System.Windows.Forms.DockStyle.Fill
       };
 
+      treeView.MouseClick += NodeMouseClick;
+
       treeView.SelectedNodesChanged += (s, e) =>
       {
         var node = treeView.SelectedNodes.LastOrDefault();
@@ -85,6 +87,73 @@ namespace SwimEditor
       Controls.Add(treeView);
 
       RegisterCommands();
+    }
+
+    private void NodeMouseClick(object sender, MouseEventArgs e)
+    {
+      if (e.Button != MouseButtons.Right)
+      {
+        return;
+      }
+
+      // CrownTreeView already selected the node on MouseDown for right-click.
+      var node = treeView.SelectedNodes.LastOrDefault();
+      if (node == null)
+      {
+        return; // right-clicked on empty area
+      }
+
+      var menu = new CrownContextMenuStrip();
+
+      if (node.Tag is SceneEntity entity)
+      {
+        int id = entity.Id;
+
+        menu.Items.Add("Create Child Entity", null, (s, _) =>
+        {
+          MainWindowForm.Instance.GameView.SendEngineMessage($"(scene.entity.create {id})");
+        });
+
+        menu.Items.Add("Delete Entity", null, (s, _) =>
+        {
+          // true = destroy children; you could pop a dialog to ask.
+          MainWindowForm.Instance.GameView.SendEngineMessage($"(scene.entity.destroy {id} true)");
+        });
+
+        menu.Items.Add("Add Material", null, (s, _) =>
+        {
+          MainWindowForm.Instance.GameView.SendEngineMessage($"(scene.entity.addComponent {id} \"Material\")");
+        });
+
+        menu.Items.Add("Remove Material", null, (s, _) =>
+        {
+          MainWindowForm.Instance.GameView.SendEngineMessage($"(scene.entity.removeComponent {id} \"Material\")");
+        });
+      }
+      else if (node.Tag is SceneComponent comp)
+      {
+        // Optional: context menu when right-clicking a component node
+        int id = comp.OwnerEntityId;
+
+        menu.Items.Add("Remove Component", null, (s, _) =>
+        {
+          MainWindowForm.Instance.GameView.SendEngineMessage($"(scene.entity.removeComponent {id} \"{comp.Name}\")");
+        });
+      }
+
+      // Root-level create: only when the scene root node itself is clicked
+      if (node == sceneRootNode)
+      {
+        menu.Items.Add("Create Entity", null, (s, _) =>
+        {
+          MainWindowForm.Instance.GameView.SendEngineMessage("(scene.entity.create 0)");
+        });
+      }
+
+      if (menu.Items.Count > 0)
+      {
+        menu.Show(treeView, e.Location);
+      }
     }
 
     private void RegisterCommands()
