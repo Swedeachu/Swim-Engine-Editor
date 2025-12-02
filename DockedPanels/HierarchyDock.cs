@@ -333,12 +333,16 @@ namespace SwimEditor
         else
         {
           // No entities; just clear UI
+          treeView.BeginUpdate();
+
           treeView.Nodes.Clear();
           entityNodesById.Clear();
 
           sceneRootNode = new CrownTreeNode(sceneName);
           treeView.Nodes.Add(sceneRootNode);
           sceneRootNode.Expanded = true;
+
+          treeView.EndUpdate();
           return;
         }
 
@@ -365,6 +369,9 @@ namespace SwimEditor
       {
         entitiesById.Clear();
         entityNodesById.Clear();
+
+        treeView.BeginUpdate();
+
         treeView.Nodes.Clear();
 
         var errorRoot = new CrownTreeNode("Scene (Failed to load)");
@@ -372,6 +379,8 @@ namespace SwimEditor
         treeView.Nodes.Add(errorRoot);
 
         errorRoot.Expanded = true;
+
+        treeView.EndUpdate();
       }
     }
 
@@ -635,7 +644,7 @@ namespace SwimEditor
     /// Also fills SceneEntity.ParentName so the inspector can show "id (Name)".
     /// Preserves:
     ///   - Expanded entities (by ID)
-    ///   - Selected entity
+    ///   - Selected node (entity or component) via FullPath
     ///   - Scroll position via HierarchyTreeView.VerticalScrollValue
     /// </summary>
     private void RebuildTreeFromEntities(bool preserveState)
@@ -643,6 +652,7 @@ namespace SwimEditor
       // Snapshot current expansion, selection and scroll before we blow away the tree.
       HashSet<int> expandedIds = new HashSet<int>();
       int? selectedId = null;
+      string selectedPath = null;
       int scrollValue = 0;
 
       if (preserveState && sceneRootNode != null)
@@ -657,13 +667,21 @@ namespace SwimEditor
         }
 
         var selectedNode = treeView.SelectedNodes.LastOrDefault();
-        if (selectedNode != null && selectedNode.Tag is SceneEntity selectedEntity)
+        if (selectedNode != null)
         {
-          selectedId = selectedEntity.Id;
+          // FullPath works for both entities and component child nodes.
+          selectedPath = selectedNode.FullPath;
+
+          if (selectedNode.Tag is SceneEntity selectedEntity)
+          {
+            selectedId = selectedEntity.Id;
+          }
         }
 
         scrollValue = treeView.VerticalScrollValue;
       }
+
+      treeView.BeginUpdate();
 
       // Clear old UI mappings
       treeView.Nodes.Clear();
@@ -675,7 +693,7 @@ namespace SwimEditor
         entity.Children.Clear();
       }
 
-      var roots = new List<SceneEntity>();
+      List<SceneEntity> roots = new List<SceneEntity>();
 
       foreach (var entity in entitiesById.Values)
       {
@@ -726,7 +744,7 @@ namespace SwimEditor
       // Restore expansion
       if (preserveState && expandedIds.Count > 0)
       {
-        foreach (var id in expandedIds)
+        foreach (int id in expandedIds)
         {
           if (entityNodesById.TryGetValue(id, out var node))
           {
@@ -735,18 +753,32 @@ namespace SwimEditor
         }
       }
 
-      // Restore selection
-      if (preserveState && selectedId.HasValue &&
-          entityNodesById.TryGetValue(selectedId.Value, out var selectedNodeNew))
-      {
-        treeView.SelectNode(selectedNodeNew);
-      }
-
-      // Restore scroll (after layout has been recomputed by UpdateNodes via node events)
+      // Restore selection (prefer exact node path; fall back to entity ID)
       if (preserveState)
       {
+        CrownTreeNode selectedNodeNew = null;
+
+        if (!string.IsNullOrEmpty(selectedPath))
+        {
+          selectedNodeNew = treeView.FindNode(selectedPath);
+        }
+
+        if (selectedNodeNew == null && selectedId.HasValue &&
+            entityNodesById.TryGetValue(selectedId.Value, out var nodeById))
+        {
+          selectedNodeNew = nodeById;
+        }
+
+        if (selectedNodeNew != null)
+        {
+          treeView.SelectNode(selectedNodeNew);
+        }
+
+        // Restore scroll (after layout has been recomputed)
         treeView.VerticalScrollValue = scrollValue;
       }
+
+      treeView.EndUpdate();
     }
 
     /// <summary>
