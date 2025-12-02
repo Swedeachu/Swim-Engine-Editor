@@ -49,7 +49,7 @@ namespace SwimEditor
 
   public class HierarchyDock : DockContent
   {
-    private readonly CrownTreeView treeView;
+    private readonly HierarchyTreeView treeView;
 
     private CommandManager CommandManager = new CommandManager();
 
@@ -67,7 +67,7 @@ namespace SwimEditor
 
     public HierarchyDock()
     {
-      treeView = new CrownTreeView
+      treeView = new HierarchyTreeView
       {
         Dock = System.Windows.Forms.DockStyle.Fill
       };
@@ -358,8 +358,8 @@ namespace SwimEditor
           entitiesById[entity.Id] = entity;
         }
 
-        // Full load; we don't care about preserving previous UI state.
-        RebuildTreeFromEntities(preserveState: false);
+        // Full load; preserve previous UI state (expanded/collapsed, selection, scroll) by ID.
+        RebuildTreeFromEntities(preserveState: true);
       }
       catch (Exception e)
       {
@@ -635,13 +635,15 @@ namespace SwimEditor
     /// Also fills SceneEntity.ParentName so the inspector can show "id (Name)".
     /// Preserves:
     ///   - Expanded entities (by ID)
-    ///   - Selected entity (and scrolls it back into view via EnsureVisible)
+    ///   - Selected entity
+    ///   - Scroll position via HierarchyTreeView.VerticalScrollValue
     /// </summary>
     private void RebuildTreeFromEntities(bool preserveState)
     {
-      // Snapshot current expansion and selection before we blow away the tree.
+      // Snapshot current expansion, selection and scroll before we blow away the tree.
       HashSet<int> expandedIds = new HashSet<int>();
       int? selectedId = null;
+      int scrollValue = 0;
 
       if (preserveState && sceneRootNode != null)
       {
@@ -659,6 +661,8 @@ namespace SwimEditor
         {
           selectedId = selectedEntity.Id;
         }
+
+        scrollValue = treeView.VerticalScrollValue;
       }
 
       // Clear old UI mappings
@@ -716,6 +720,7 @@ namespace SwimEditor
         AddEntityHierarchy(entity, sceneRootNode);
       }
 
+      // Root always shown; children expansion handled below
       sceneRootNode.Expanded = true;
 
       // Restore expansion
@@ -730,19 +735,17 @@ namespace SwimEditor
         }
       }
 
-      // Restore selection and scroll to it
+      // Restore selection
       if (preserveState && selectedId.HasValue &&
           entityNodesById.TryGetValue(selectedId.Value, out var selectedNodeNew))
       {
         treeView.SelectNode(selectedNodeNew);
-        try
-        {
-          treeView.EnsureVisible();
-        }
-        catch
-        {
-          // Ignore any EnsureVisible issues
-        }
+      }
+
+      // Restore scroll (after layout has been recomputed by UpdateNodes via node events)
+      if (preserveState)
+      {
+        treeView.VerticalScrollValue = scrollValue;
       }
     }
 
@@ -802,9 +805,6 @@ namespace SwimEditor
       {
         AddEntityHierarchy(child, entityNode);
       }
-
-      // Keep entities expanded by default when first built
-      entityNode.Expanded = true;
     }
 
   } // class HierarchyDock
