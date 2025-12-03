@@ -1384,7 +1384,9 @@ namespace SwimEditor
 
         // If this node has not yet been populated (placeholder), we consider it not active
         if (current.Nodes.Count == 1 && current.Nodes[0].Tag == null)
+        {
           return null;
+        }
 
         var next = current.Nodes.FirstOrDefault(n =>
         {
@@ -1393,7 +1395,9 @@ namespace SwimEditor
         });
 
         if (next == null)
+        {
           return null;
+        }
 
         current = next;
       }

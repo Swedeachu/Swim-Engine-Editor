@@ -127,6 +127,13 @@ namespace SwimEditor
           MaterialPopUp(id);
         });
 
+        menu.Items.Add("Add Behavior", null, (s, _) =>
+        {
+          BehaviorPopUp(id);
+        });
+
+        // TODO: remove specific behaviors somehow on editor side
+
         menu.Items.Add("Remove Material", null, (s, _) =>
         {
           MainWindowForm.Instance.GameView.SendEngineMessage($"(scene.entity.removeComponent {id} \"Material\")");
@@ -159,6 +166,15 @@ namespace SwimEditor
     private void MaterialPopUp(int id)
     {
       using (var popup = new MaterialAssetGridSelection(id))
+      {
+        popup.StartPosition = FormStartPosition.CenterParent;
+        popup.ShowDialog(MainWindowForm.Instance);
+      }
+    }
+
+    private void BehaviorPopUp(int id)
+    {
+      using (var popup = new BehaviorAssetGridSelection(id))
       {
         popup.StartPosition = FormStartPosition.CenterParent;
         popup.ShowDialog(MainWindowForm.Instance);
@@ -213,6 +229,16 @@ namespace SwimEditor
           AssetDatabase.Materials.Clear();
         }
       );
+
+      CommandManager.RegisterCommand(
+        name: "loadBehavior",
+        aliases: System.Array.Empty<string>(),
+        usage: "loadBehavior <string>\n" + "  Tells the editor a name of a behavior loaded inside the engine's behavior factory we can use",
+        handler: args =>
+        {
+          HandleBehaviorCommand(args);
+        }
+      );
     }
 
     private void HandleMaterialCommand(string args)
@@ -224,6 +250,17 @@ namespace SwimEditor
 
       // Just blindly throw in the asset for now fully trusting the engine, what could go wrong?
       AssetDatabase.Materials.Add(args);
+    }
+
+    private void HandleBehaviorCommand(string args)
+    {
+      if (string.IsNullOrWhiteSpace(args))
+      {
+        return;
+      }
+
+      // Just blindly throw in the asset for now fully trusting the engine, what could go wrong?
+      AssetDatabase.Behaviors.Add(args);
     }
 
     private void HandleSceneCommand(string args)

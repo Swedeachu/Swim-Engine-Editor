@@ -8,6 +8,8 @@ namespace SwimEditor
 
     public static List<string> Materials = new List<string>();
 
+    public static List<string> Behaviors = new List<string>();
+
   } // class AssetDatabase
 
 } // namespace SwimEditor
