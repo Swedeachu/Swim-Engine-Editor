@@ -20,6 +20,8 @@ namespace SwimEditor
     private readonly System.Windows.Forms.Panel mainPanel;
     private readonly System.Windows.Forms.Panel bottomPanel;
 
+    private readonly CrownTextBox searchBox;
+
     private readonly System.Windows.Forms.Button okButton;
     private readonly System.Windows.Forms.Button cancelButton;
 
@@ -77,13 +79,26 @@ namespace SwimEditor
       mainPanel.Controls.Add(grid);
       mainPanel.Controls.Add(vBar);
 
-      // Bottom panel with OK / Cancel buttons
+      // Bottom panel with search + OK / Cancel buttons
       bottomPanel = new System.Windows.Forms.Panel
       {
         Dock = DockStyle.Bottom,
         Height = 40,
         Padding = new Padding(8, 4, 8, 4),
         BackColor = SwimEditorTheme.PageBg
+      };
+
+      searchBox = new CrownTextBox
+      {
+        BorderStyle = BorderStyle.FixedSingle,
+        BackColor = SwimEditorTheme.InputBg,
+        ForeColor = SwimEditorTheme.Text,
+        Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top
+      };
+
+      searchBox.TextChanged += (s, e) =>
+      {
+        grid.SetFilter(searchBox.Text);
       };
 
       okButton = new System.Windows.Forms.Button
@@ -139,6 +154,8 @@ namespace SwimEditor
         Close();
       };
 
+      // Add controls to bottom panel (order doesn't matter, layout handled in resize)
+      bottomPanel.Controls.Add(searchBox);
       bottomPanel.Controls.Add(cancelButton);
       bottomPanel.Controls.Add(okButton);
       bottomPanel.Resize += BottomPanel_Resize;
@@ -181,6 +198,24 @@ namespace SwimEditor
           right - okButton.Width,
           (bottomPanel.ClientSize.Height - okButton.Height) / 2
         );
+        right = okButton.Left - spacing;
+      }
+
+      if (searchBox != null)
+      {
+        int left = bottomPanel.Padding.Left;
+        int availableWidth = right - left;
+
+        if (availableWidth < 50)
+        {
+          availableWidth = 50;
+        }
+
+        searchBox.Size = new Size(availableWidth, searchBox.Height);
+        searchBox.Location = new Point(
+          left,
+          (bottomPanel.ClientSize.Height - searchBox.Height) / 2
+        );
       }
     }
 
@@ -214,6 +249,7 @@ namespace SwimEditor
 
   internal class MaterialGridControl : Control
   {
+    private readonly List<string> allItems = new List<string>();
     private readonly List<string> items = new List<string>();
 
     private int itemWidth = 160;
@@ -227,6 +263,8 @@ namespace SwimEditor
     private int selectedIndex = -1;
 
     private Image materialIcon;
+
+    private string filterText = string.Empty;
 
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public int MouseWheelScrollMultiplier { get; set; } = 48;
@@ -261,11 +299,44 @@ namespace SwimEditor
 
     public void SetMaterials(IEnumerable<string> materials)
     {
-      items.Clear();
+      allItems.Clear();
 
       if (materials != null)
       {
-        items.AddRange(materials.Where(m => !string.IsNullOrWhiteSpace(m)));
+        allItems.AddRange(materials.Where(m => !string.IsNullOrWhiteSpace(m)));
+      }
+
+      ApplyFilter();
+    }
+
+    public void SetFilter(string filter)
+    {
+      filterText = filter ?? string.Empty;
+      ApplyFilter();
+    }
+
+    private void ApplyFilter()
+    {
+      string previousKey = SelectedMaterialKey;
+
+      items.Clear();
+
+      if (allItems.Count > 0)
+      {
+        if (string.IsNullOrWhiteSpace(filterText))
+        {
+          items.AddRange(allItems);
+        }
+        else
+        {
+          string f = filterText.Trim();
+          items.AddRange(
+            allItems.Where(m =>
+              !string.IsNullOrEmpty(m) &&
+              m.IndexOf(f, StringComparison.OrdinalIgnoreCase) >= 0
+            )
+          );
+        }
       }
 
       if (items.Count == 0)
@@ -273,9 +344,29 @@ namespace SwimEditor
         selectedIndex = -1;
         hoverIndex = -1;
       }
-      else if (selectedIndex >= items.Count)
+      else
       {
-        selectedIndex = items.Count - 1;
+        if (!string.IsNullOrWhiteSpace(previousKey))
+        {
+          int idx = items.FindIndex(m => string.Equals(m, previousKey, StringComparison.Ordinal));
+          if (idx >= 0)
+          {
+            selectedIndex = idx;
+          }
+          else if (selectedIndex >= items.Count)
+          {
+            selectedIndex = items.Count - 1;
+          }
+        }
+        else if (selectedIndex >= items.Count)
+        {
+          selectedIndex = items.Count - 1;
+        }
+
+        if (selectedIndex < 0 && items.Count > 0)
+        {
+          selectedIndex = 0;
+        }
       }
 
       scrollOffset = 0;
@@ -762,6 +853,7 @@ namespace SwimEditor
         g.DrawRectangle(p, inner);
       }
 
+      // Icon on the left
       int iconSize = 32;
       int iconMargin = 8;
       Rectangle iconRect = new Rectangle(
@@ -776,6 +868,7 @@ namespace SwimEditor
         g.DrawImage(materialIcon, iconRect);
       }
 
+      // Text to the right of icon
       int textLeft = iconRect.Right + iconMargin;
       Rectangle textRect = new Rectangle(
         textLeft,
@@ -784,14 +877,243 @@ namespace SwimEditor
         inner.Height - 8
       );
 
-      TextRenderer.DrawText(
+      // Allow up to 4 lines of text inside the tile
+      DrawWrappedLabel(g, label, textRect, textColor, 4);
+    }
+
+    /// <summary>
+    /// Draws label as up to maxLines lines, wrapping on separators
+    /// (space, '/', '\\', '_', '-'). Last line gets ellipsis if it still overflows.
+    /// </summary>
+    private void DrawWrappedLabel(Graphics g, string label, Rectangle rect, Color color, int maxLines)
+    {
+      if (string.IsNullOrEmpty(label) || maxLines <= 0)
+      {
+        return;
+      }
+
+      List<string> lines;
+      BuildMultiLineLabel(g, label, rect.Width, maxLines, out lines);
+
+      if (lines == null || lines.Count == 0)
+      {
+        return;
+      }
+
+      var flagsMeasure = TextFormatFlags.NoPadding | TextFormatFlags.Left;
+
+      int lineHeight = TextRenderer.MeasureText(
         g,
-        label,
+        "Ag",
         Font,
-        textRect,
-        textColor,
-        TextFormatFlags.EndEllipsis | TextFormatFlags.VerticalCenter
-      );
+        new Size(rect.Width, int.MaxValue),
+        flagsMeasure
+      ).Height;
+
+      int totalHeight = lineHeight * lines.Count;
+
+      int y = rect.Top + (rect.Height - totalHeight) / 2;
+      if (y < rect.Top)
+      {
+        y = rect.Top;
+      }
+
+      Rectangle lineRect = new Rectangle(rect.Left, y, rect.Width, lineHeight);
+      var flagsDraw = TextFormatFlags.NoPrefix | TextFormatFlags.Left;
+
+      for (int i = 0; i < lines.Count; i++)
+      {
+        TextRenderer.DrawText(
+          g,
+          lines[i],
+          Font,
+          lineRect,
+          color,
+          flagsDraw
+        );
+
+        lineRect.Y += lineHeight;
+      }
+    }
+
+    /// <summary>
+    /// Splits label into up to maxLines lines that fit within maxWidth,
+    /// preferring to break on separators; last line gets "..." if needed.
+    /// </summary>
+    private void BuildMultiLineLabel(Graphics g, string label, int maxWidth, int maxLines, out List<string> lines)
+    {
+      lines = new List<string>();
+      if (string.IsNullOrEmpty(label) || maxLines <= 0)
+      {
+        return;
+      }
+
+      var flags = TextFormatFlags.NoPadding | TextFormatFlags.Left;
+
+      string remaining = label.Trim();
+
+      Size Measure(string text)
+      {
+        return TextRenderer.MeasureText(
+          g,
+          text,
+          Font,
+          new Size(int.MaxValue, int.MaxValue),
+          flags
+        );
+      }
+
+      for (int lineIndex = 0; lineIndex < maxLines && !string.IsNullOrEmpty(remaining); lineIndex++)
+      {
+        bool isLast = (lineIndex == maxLines - 1);
+
+        // Last line: just fit what remains, with ellipsis if needed.
+        if (isLast)
+        {
+          string cur = remaining;
+
+          Size sFull = Measure(cur);
+          if (sFull.Width <= maxWidth)
+          {
+            lines.Add(cur);
+            break;
+          }
+
+          string ellipsis = "...";
+
+          for (int len = cur.Length; len > 0; len--)
+          {
+            string candidate = cur.Substring(0, len) + ellipsis;
+            Size s = Measure(candidate);
+
+            if (s.Width <= maxWidth)
+            {
+              lines.Add(candidate);
+              return;
+            }
+          }
+
+          lines.Add(ellipsis);
+          return;
+        }
+
+        // Non-last line: find a break position that fits this width.
+        string work = remaining;
+        Size fullSize = Measure(work);
+
+        // If everything fits on this line and we still have lines left,
+        // just put it all here and stop.
+        if (fullSize.Width <= maxWidth)
+        {
+          lines.Add(work);
+          break;
+        }
+
+        List<int> breaks = new List<int>();
+
+        for (int i = 0; i < work.Length; i++)
+        {
+          char c = work[i];
+          if (c == ' ' || c == '/' || c == '\\' || c == '_' || c == '-')
+          {
+            breaks.Add(i + 1);
+          }
+        }
+
+        int breakPos = -1;
+
+        if (breaks.Count > 0)
+        {
+          foreach (int pos in breaks)
+          {
+            string candidate = work.Substring(0, pos);
+            Size s = Measure(candidate);
+
+            if (s.Width <= maxWidth)
+            {
+              breakPos = pos;
+            }
+            else
+            {
+              break;
+            }
+          }
+
+          if (breakPos <= 0)
+          {
+            breakPos = breaks[0];
+          }
+        }
+        else
+        {
+          double ratio = maxWidth / (double)fullSize.Width;
+          int approxChars = Math.Max(1, (int)Math.Floor(work.Length * ratio));
+
+          if (approxChars >= work.Length)
+          {
+            approxChars = work.Length - 1;
+          }
+
+          breakPos = approxChars;
+        }
+
+        // Make break one character more conservative to avoid edge clipping.
+        if (breakPos > 1)
+        {
+          breakPos--;
+        }
+
+        if (breakPos <= 0 || breakPos >= work.Length)
+        {
+          // Fallback: treat this as the last line with ellipsis.
+          string cur = work;
+          string ellipsis = "...";
+
+          for (int len = cur.Length; len > 0; len--)
+          {
+            string candidate = cur.Substring(0, len) + ellipsis;
+            Size s = Measure(candidate);
+
+            if (s.Width <= maxWidth)
+            {
+              lines.Add(candidate);
+              return;
+            }
+          }
+
+          lines.Add(ellipsis);
+          return;
+        }
+
+        string line = work.Substring(0, breakPos);
+        // Ensure it actually fits, backing off if needed.
+        while (line.Length > 1 && Measure(line).Width > maxWidth)
+        {
+          breakPos--;
+          if (breakPos <= 0)
+          {
+            break;
+          }
+          line = work.Substring(0, breakPos);
+        }
+
+        line = line.TrimEnd();
+        if (line.Length == 0)
+        {
+          // Safety: avoid infinite loop, push ellipsis and bail.
+          lines.Add("...");
+          return;
+        }
+
+        lines.Add(line);
+
+        if (breakPos >= work.Length)
+        {
+          break;
+        }
+
+        remaining = work.Substring(breakPos).TrimStart();
+      }
     }
 
     private static Image CreateMaterialIcon()
