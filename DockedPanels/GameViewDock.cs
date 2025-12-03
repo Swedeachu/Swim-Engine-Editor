@@ -4,7 +4,6 @@ using System.Text;
 using WeifenLuo.WinFormsUI.Docking;
 using Timer = System.Windows.Forms.Timer;
 using System.ComponentModel;
-using System.Drawing;
 
 namespace SwimEditor
 {

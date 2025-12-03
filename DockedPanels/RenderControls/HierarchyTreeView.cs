@@ -1,6 +1,7 @@
 ﻿using System;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
+using System.Windows.Forms;
 using ReaLTaiizor.Controls;
 
 namespace SwimEditor
@@ -9,6 +10,7 @@ namespace SwimEditor
   /// Thin wrapper over CrownTreeView that:
   ///   - Exposes vertical scroll value
   ///   - Provides BeginUpdate/EndUpdate to suspend painting during bulk updates
+  ///   - Adds adjustable mouse wheel scroll sensitivity
   /// </summary>
   public class HierarchyTreeView : CrownTreeView
   {
@@ -18,6 +20,29 @@ namespace SwimEditor
     private static extern IntPtr SendMessage(IntPtr hWnd, int msg, bool wParam, int lParam);
 
     private int updateNesting = 0;
+
+    private int mouseWheelScrollMultiplier = 1;
+
+    [Category("Behavior")]
+    [Description("Multiplier applied to mouse wheel scroll amount. 1 = default Crown behavior.")]
+    [DefaultValue(1)]
+    public int MouseWheelScrollMultiplier
+    {
+      get
+      {
+        return mouseWheelScrollMultiplier;
+      }
+
+      set
+      {
+        if (value < 1)
+        {
+          value = 1;
+        }
+
+        mouseWheelScrollMultiplier = value;
+      }
+    }
 
     [Browsable(false)]
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
@@ -105,6 +130,61 @@ namespace SwimEditor
         catch
         {
           // Ignore any interop issues.
+        }
+      }
+    }
+
+    /// <summary>
+    /// Override mouse wheel handling to use MouseWheelScrollMultiplier.
+    /// </summary>
+    protected override void OnMouseWheel(MouseEventArgs e)
+    {
+      // Optional: ensure we take focus when scrolling inside the control.
+      if (!Focused && CanFocus)
+      {
+        Focus();
+      }
+
+      bool horizontal = false;
+
+      if (_hScrollBar.Visible && ModifierKeys == Keys.Control)
+      {
+        horizontal = true;
+      }
+
+      if (_hScrollBar.Visible && !_vScrollBar.Visible)
+      {
+        horizontal = true;
+      }
+
+      int step = 3 * MouseWheelScrollMultiplier;
+
+      if (!horizontal)
+      {
+        if (_vScrollBar.Visible)
+        {
+          if (e.Delta > 0)
+          {
+            _vScrollBar.ScrollByPhysical(step);
+          }
+          else if (e.Delta < 0)
+          {
+            _vScrollBar.ScrollByPhysical(-step);
+          }
+        }
+      }
+      else
+      {
+        if (_hScrollBar.Visible)
+        {
+          if (e.Delta > 0)
+          {
+            _hScrollBar.ScrollByPhysical(step);
+          }
+          else if (e.Delta < 0)
+          {
+            _hScrollBar.ScrollByPhysical(-step);
+          }
         }
       }
     }

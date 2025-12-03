@@ -4,7 +4,6 @@ using ReaLTaiizor.Controls;
 
 namespace SwimEditor
 {
-  // Backing models for hierarchy + inspector
 
   public class SceneComponent
   {
@@ -71,6 +70,7 @@ namespace SwimEditor
       {
         Dock = System.Windows.Forms.DockStyle.Fill
       };
+      treeView.MouseWheelScrollMultiplier = 5; // more scroll power
 
       treeView.MouseClick += NodeMouseClick;
 
@@ -105,6 +105,8 @@ namespace SwimEditor
 
       var menu = new CrownContextMenuStrip();
 
+      // If right clicked an entity we can give it a child, delete the entity, or set/remvoe a material on it
+      // TODO: add other components to it like object tag or behaviors (need behavior factory on engine side for this)
       if (node.Tag is SceneEntity entity)
       {
         int id = entity.Id;
@@ -120,9 +122,9 @@ namespace SwimEditor
           MainWindowForm.Instance.GameView.SendEngineMessage($"(scene.entity.destroy {id} true)");
         });
 
-        menu.Items.Add("Add Material", null, (s, _) =>
+        menu.Items.Add("Set Material", null, (s, _) =>
         {
-          MainWindowForm.Instance.GameView.SendEngineMessage($"(scene.entity.addComponent {id} \"Material\")");
+          MaterialPopUp(id);
         });
 
         menu.Items.Add("Remove Material", null, (s, _) =>
@@ -130,11 +132,9 @@ namespace SwimEditor
           MainWindowForm.Instance.GameView.SendEngineMessage($"(scene.entity.removeComponent {id} \"Material\")");
         });
       }
-      else if (node.Tag is SceneComponent comp)
+      else if (node.Tag is SceneComponent comp) // if right clicking a component node to remove it
       {
-        // Optional: context menu when right-clicking a component node
         int id = comp.OwnerEntityId;
-
         menu.Items.Add("Remove Component", null, (s, _) =>
         {
           MainWindowForm.Instance.GameView.SendEngineMessage($"(scene.entity.removeComponent {id} \"{comp.Name}\")");
@@ -153,6 +153,15 @@ namespace SwimEditor
       if (menu.Items.Count > 0)
       {
         menu.Show(treeView, e.Location);
+      }
+    }
+
+    private void MaterialPopUp(int id)
+    {
+      using (var popup = new MaterialAssetGridSelection(id))
+      {
+        popup.StartPosition = FormStartPosition.CenterParent;
+        popup.ShowDialog(MainWindowForm.Instance);
       }
     }
 
@@ -184,6 +193,37 @@ namespace SwimEditor
           HandleSceneCommand(args);
         }
       );
+
+      CommandManager.RegisterCommand(
+        name: "registerMaterial",
+        aliases: System.Array.Empty<string>(),
+        usage: "registerMatieral <string>\n" + "  Tells the editor a name of a material loaded inside the engine's Material Pool we can use",
+        handler: args =>
+        {
+          HandleMaterialCommand(args);
+        }
+      );
+
+      CommandManager.RegisterCommand(
+        name: "clearMaterials",
+        aliases: System.Array.Empty<string>(),
+        usage: "clearMaterials",
+        handler: args =>
+        {
+          AssetDatabase.Materials.Clear();
+        }
+      );
+    }
+
+    private void HandleMaterialCommand(string args)
+    {
+      if (string.IsNullOrWhiteSpace(args))
+      {
+        return;
+      }
+
+      // Just blindly throw in the asset for now fully trusting the engine, what could go wrong?
+      AssetDatabase.Materials.Add(args);
     }
 
     private void HandleSceneCommand(string args)

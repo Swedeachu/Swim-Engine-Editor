@@ -1,11 +1,12 @@
 ﻿using ReaLTaiizor.Controls;
+using System;
 using System.Runtime.InteropServices;
+using System.Windows.Forms;
 
 namespace SwimEditor
 {
   static class ListViewCrownScrollBinder
   {
-
     // Win32 & ListView messages
     private const int WM_VSCROLL = 0x0115;
     private const int WM_HSCROLL = 0x0114;
@@ -55,8 +56,15 @@ namespace SwimEditor
     private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
 
     [DllImport("user32.dll", SetLastError = true)]
-    private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter,
-                                            int X, int Y, int cx, int cy, uint uFlags);
+    private static extern bool SetWindowPos(
+      IntPtr hWnd,
+      IntPtr hWndInsertAfter,
+      int X,
+      int Y,
+      int cx,
+      int cy,
+      uint uFlags
+    );
 
     [StructLayout(LayoutKind.Sequential)]
     private struct SCROLLINFO
@@ -72,12 +80,18 @@ namespace SwimEditor
 
     private class Subclass : NativeWindow
     {
-
       private readonly ListView _lv;
       private readonly CrownScrollBar _vBar;
+
       private int _lastV;
 
-      // how many pixels per wheel "line" to move in LargeIcon view (tweak if you want)
+      // Guard: prevent recursion via ValueChanged when we update Value programmatically.
+      private bool _suppressBarValueChanged;
+
+      // Guard: prevent re-entrant Refresh/Disable when those calls themselves generate messages.
+      private bool _inRefresh;
+
+      // how many pixels per wheel "line" to move in LargeIcon view
       private readonly int _wheelPixelsPerLine;
 
       public Subclass(ListView lv, CrownScrollBar vBar)
@@ -85,12 +99,10 @@ namespace SwimEditor
         _lv = lv;
         _vBar = vBar;
 
-        // 16–24 usually feels OK with 48px thumbnails; tie to image size if you like.
         _wheelPixelsPerLine = 16;
 
         AssignHandle(lv.Handle);
 
-        // Hide & strip native scrollbars right away
         DisableNativeBarsHard();
         WireBars();
         RefreshAll();
@@ -98,13 +110,18 @@ namespace SwimEditor
         _lv.Resize += (s, e) => RefreshAll();
         _lv.HandleDestroyed += (s, e) => ReleaseHandle();
 
-        // If the mouse wheel happens while hovering our custom vBar, scroll the ListView.
         if (_vBar != null)
         {
+          // Scroll via mouse wheel when hovering the Crown bar
           _vBar.MouseWheel += (s, e) =>
           {
-            int lines = Math.Max(1, SystemInformation.MouseWheelScrollLines);
-            int dir = Math.Sign(-e.Delta); // wheel up = negative scroll (content up)
+            int lines = SystemInformation.MouseWheelScrollLines;
+            if (lines <= 0)
+            {
+              lines = 1;
+            }
+
+            int dir = Math.Sign(-e.Delta); // wheel up => content scrolls up (negative offset)
             int pixels = dir * lines * _wheelPixelsPerLine;
 
             if (pixels != 0)
@@ -118,122 +135,228 @@ namespace SwimEditor
 
       private static SCROLLINFO ReadSI(IntPtr handle, int bar)
       {
-        var si = new SCROLLINFO { cbSize = Marshal.SizeOf<SCROLLINFO>(), fMask = SIF_ALL };
+        var si = new SCROLLINFO
+        {
+          cbSize = Marshal.SizeOf<SCROLLINFO>(),
+          fMask = SIF_ALL
+        };
         GetScrollInfo(handle, bar, ref si);
         return si;
       }
 
       private void WireBars()
       {
-        if (_vBar != null)
+        if (_vBar == null)
         {
-          // ensure vertical orientation (default is vertical, but be explicit)
-          _vBar.ScrollOrientation = 0;
-
-          _vBar.ValueChanged += (s, e) =>
-          {
-            int delta = _vBar.Value - _lastV;
-            if (delta != 0)
-            {
-              // vertical pixel scroll
-              SendMessage(_lv.Handle, LVM_SCROLL, IntPtr.Zero, new IntPtr(delta));
-              _lastV = _vBar.Value;
-              RefreshV();
-            }
-          };
+          return;
         }
+
+        _vBar.ScrollOrientation = ReaLTaiizor.Enum.Crown.ScrollOrientation.Vertical;
+
+        _vBar.ValueChanged += (s, e) =>
+        {
+          if (_suppressBarValueChanged)
+          {
+            return;
+          }
+
+          int delta = _vBar.Value - _lastV;
+          if (delta == 0)
+          {
+            return;
+          }
+
+          // Scroll the ListView vertically by delta pixels
+          SendMessage(_lv.Handle, LVM_SCROLL, IntPtr.Zero, new IntPtr(delta));
+
+          // Then resync Crown bar to whatever the ListView actually ended up at
+          RefreshV();
+        };
       }
 
       private void RefreshV()
       {
-        if (_vBar == null) return;
+        if (_vBar == null)
+        {
+          return;
+        }
 
-        var si = ReadSI(_lv.Handle, SB_VERT);
+        if (_inRefresh)
+        {
+          return;
+        }
 
-        // Map native SCROLLINFO -> CrownScrollBar model cleanly
-        // CrownScrollBar needs: Minimum, Maximum (content), ViewSize (viewport), Value (pos)
-        // Win32 gives us: nMin/nMax (pos range), nPage (page size), nPos (current)
-        int contentRange = Math.Max(0, si.nMax - si.nMin + 1);
-        int page = Math.Max(0, si.nPage);
-        int pos = Math.Max(0, si.nPos);
+        _inRefresh = true;
+        try
+        {
+          var si = ReadSI(_lv.Handle, SB_VERT);
 
-        _vBar.Minimum = 0;
-        _vBar.Maximum = contentRange; // total content "units"
-        _vBar.ViewSize = page;        // visible "units" (affects thumb size)
+          int contentRange = Math.Max(0, si.nMax - si.nMin + 1);
+          int page = Math.Max(0, si.nPage);
+          int pos = Math.Max(0, si.nPos);
 
-        _lastV = Math.Min(pos, Math.Max(0, contentRange - page));
-        if (_vBar.Value != _lastV)
-          _vBar.Value = _lastV;
+          _vBar.Minimum = 0;
 
-        // hide bar if no scrollable range
-        _vBar.Visible = (contentRange > page);
+          if (contentRange <= 0)
+          {
+            _vBar.Maximum = 1;
+            _vBar.ViewSize = 1;
+
+            _suppressBarValueChanged = true;
+            try
+            {
+              _lastV = 0;
+              if (_vBar.Value != 0)
+              {
+                _vBar.Value = 0;
+              }
+            }
+            finally
+            {
+              _suppressBarValueChanged = false;
+            }
+
+            _vBar.Visible = false;
+            return;
+          }
+
+          _vBar.Maximum = contentRange;
+          _vBar.ViewSize = Math.Min(_vBar.Maximum, page > 0 ? page : _vBar.Maximum);
+
+          int maxPos = Math.Max(0, _vBar.Maximum - _vBar.ViewSize);
+          int newValue = Math.Min(pos, maxPos);
+
+          _suppressBarValueChanged = true;
+          try
+          {
+            _lastV = newValue;
+            if (_vBar.Value != newValue)
+            {
+              _vBar.Value = newValue;
+            }
+          }
+          finally
+          {
+            _suppressBarValueChanged = false;
+          }
+
+          _vBar.Visible = (contentRange > page);
+        }
+        finally
+        {
+          _inRefresh = false;
+        }
       }
 
       private void RefreshAll()
       {
-        DisableNativeBarsSoft();
-        RefreshV();
+        if (_inRefresh)
+        {
+          return;
+        }
+
+        _inRefresh = true;
+        try
+        {
+          DisableNativeBarsSoft();
+          RefreshV();
+        }
+        finally
+        {
+          _inRefresh = false;
+        }
       }
 
       private void DisableNativeBarsSoft()
       {
-        // Redo every time to avoid flash when ListView relayouts
-        try { ShowScrollBar(_lv.Handle, SB_VERT, false); } catch { }
-        try { ShowScrollBar(_lv.Handle, SB_HORZ, false); } catch { }
+        // called a lot – guard to avoid message feedback loops
+        try
+        {
+          ShowScrollBar(_lv.Handle, SB_VERT, false);
+        }
+        catch
+        {
+        }
+
+        try
+        {
+          ShowScrollBar(_lv.Handle, SB_HORZ, false);
+        }
+        catch
+        {
+        }
       }
 
       private void DisableNativeBarsHard()
       {
-        // Remove WS_VSCROLL/WS_HSCROLL so Windows can’t resurrect them (prevents flash)
         try
         {
           int style = GetWindowLong(_lv.Handle, GWL_STYLE);
           int newStyle = style & ~(WS_VSCROLL | WS_HSCROLL);
+
           if (newStyle != style)
           {
             SetWindowLong(_lv.Handle, GWL_STYLE, newStyle);
-            SetWindowPos(_lv.Handle, IntPtr.Zero, 0, 0, 0, 0,
-              SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+            SetWindowPos(
+              _lv.Handle,
+              IntPtr.Zero,
+              0,
+              0,
+              0,
+              0,
+              SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED
+            );
           }
         }
-        catch { }
+        catch
+        {
+        }
 
         DisableNativeBarsSoft();
       }
 
-      // Helper to mirror GET_WHEEL_DELTA_WPARAM safely on x86/x64
+      // Helper mimicking GET_WHEEL_DELTA_WPARAM with sign preserved
       private static int GetWheelDeltaFromWParam(IntPtr wParam)
       {
-        // HIWORD of WPARAM, preserved sign
         long wp = wParam.ToInt64();
         int hiword = unchecked((int)((wp >> 16) & 0xFFFF));
-        return (short)hiword; // cast to short to keep the sign, then widen to int
+        return (short)hiword;
       }
 
       protected override void WndProc(ref Message m)
       {
-        // Intercept wheel and drive ListView ourselves when needed.
+        // Intercept mouse wheel on the ListView itself
         if (m.Msg == WM_MOUSEWHEEL)
         {
-          int delta = GetWheelDeltaFromWParam(m.WParam);   // +120/-120 per notch typically
+          int delta = GetWheelDeltaFromWParam(m.WParam);
           if (delta != 0)
           {
-            int lines = Math.Max(1, SystemInformation.MouseWheelScrollLines);
-            int dir = Math.Sign(-delta);                   // wheel up => scroll content up
+            int lines = SystemInformation.MouseWheelScrollLines;
+            if (lines <= 0)
+            {
+              lines = 1;
+            }
+
+            int dir = Math.Sign(-delta);
             int pixels = dir * lines * _wheelPixelsPerLine;
 
             if (pixels != 0)
             {
               SendMessage(_lv.Handle, LVM_SCROLL, IntPtr.Zero, new IntPtr(pixels));
               RefreshV();
-              return; // eat it; we handled the scroll
+              return;
             }
           }
         }
 
         base.WndProc(ref m);
 
-        // Whenever the ListView changes layout or scrolls, keep bars hidden & synced.
+        // Only react to layout/scroll messages when we're *not* already in a refresh cycle
+        if (_inRefresh)
+        {
+          return;
+        }
+
         switch (m.Msg)
         {
           case WM_VSCROLL:
@@ -242,19 +365,21 @@ namespace SwimEditor
           case WM_WINDOWPOSCHANGED:
           case WM_NCCALCSIZE:
           case WM_STYLECHANGED:
-            DisableNativeBarsSoft();
-            RefreshV();
+          {
+            RefreshAll();
             break;
+          }
 
           case WM_HSCROLL:
           case WM_MOUSEHWHEEL:
+          {
             // no horizontal bar in this layout; just keep native hidden
             DisableNativeBarsSoft();
             break;
+          }
         }
       }
-
-    } // Subclass
+    }
 
     public static void Attach(ListView lv, CrownScrollBar vertical, CrownScrollBar horizontal = null)
     {
@@ -264,18 +389,21 @@ namespace SwimEditor
       }
       else
       {
-        lv.HandleCreated += (s, e) => _ = new Subclass(lv, vertical);
+        lv.HandleCreated += (s, e) =>
+        {
+          _ = new Subclass(lv, vertical);
+        };
       }
     }
 
-    // Call this after you repopulate items if needed:
+    // Call this after repopulating items if needed
     public static void Nudge(ListView lv)
     {
-      // a harmless nudge forces SCROLLINFO to recalc
       if (lv.IsHandleCreated)
+      {
         SendMessage(lv.Handle, LVM_SCROLL, IntPtr.Zero, IntPtr.Zero);
+      }
     }
+  }
 
-  } // class ListViewCrownScrollBinder
-
-} // Namespace SwimEditor
+}
